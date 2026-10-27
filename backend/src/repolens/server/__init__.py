@@ -7,27 +7,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import secrets
+import shutil
 import threading
+import time
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
 from repolens.analysis import analyze
 from repolens.contracts import dependency_preview
+from repolens.diagnostics import configure_logging, error_text, get_logger
 from repolens.errors import RepoLensError
-from repolens.indexing import scan_repository
+from repolens.indexing import MAX_BROWSE_BYTES, MAX_BROWSE_FILES, MAX_FILE_BYTES, scan_repository
 from repolens.llm import DEFAULT_MODEL, DeepSeekClient, validate_key
 from repolens import platform as credentials
 from repolens.platform.dialogs import choose_directory
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+LOGGER = get_logger()
 
 
 class AppState:
     def __init__(self, repository: str | Path | None = None, *, client_factory=DeepSeekClient, restore_key=True,
                  directory_picker=choose_directory):
+        LOGGER.info("state.init repository=%s", Path(repository).name if repository else "none")
         self.index = scan_repository(repository) if repository else None
         self.graph = dependency_preview(self.index) if self.index else None
+        self.repository_label = None
+        self.upload_root = PROJECT_ROOT / ".repolens" / "uploads"
+        self.upload_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.picker_lock = threading.Lock()
         self.picker_thread = None
@@ -64,26 +72,36 @@ class AppState:
             self.picker_error = None
             self.picker_cancelled = False
             self.phase = "请在 Windows 目录选择器中选择项目……"
+            LOGGER.info("picker.begin")
             self.picker_thread = threading.Thread(target=self._pick_worker, daemon=True)
             self.picker_thread.start()
 
     def _pick_worker(self) -> None:
+        started = time.monotonic()
+        LOGGER.info("picker.worker_started")
         try:
             root = self.directory_picker()
             if root is None:
                 with self.picker_lock:
                     self.picker_cancelled = True
+                LOGGER.info("picker.cancelled elapsed_ms=%d", int((time.monotonic() - started) * 1000))
                 return
+            LOGGER.info("picker.selected name=%s", Path(root).name)
             candidate_index = scan_repository(root)
             candidate_graph = dependency_preview(candidate_index)
             with self.picker_lock:
                 self.picker_result = (candidate_index, candidate_graph)
+            LOGGER.info("picker.indexed files=%d edges=%d elapsed_ms=%d",
+                        len(candidate_index.documents), len(candidate_index.edges),
+                        int((time.monotonic() - started) * 1000))
         except RepoLensError as exc:
             with self.picker_lock:
                 self.picker_error = str(exc)
+            LOGGER.warning("picker.failed error=%s", error_text(exc))
         except Exception:
             with self.picker_lock:
                 self.picker_error = "无法完成目录选择，请改用输入路径或重新启动。"
+            LOGGER.exception("picker.unhandled")
         finally:
             self.phase = "就绪"
 
@@ -103,13 +121,14 @@ class AppState:
                 candidate_index, candidate_graph = self.picker_result
                 self.index, self.graph = candidate_index, candidate_graph
                 self.picker_result = None
+                LOGGER.info("picker.result_delivered")
                 return {"pending": False, "repository": self.repository_summary(), "graph": self.graph}
             return {"pending": False}
 
     def repository_summary(self) -> dict | None:
         if self.index is None:
             return None
-        return {"name": self.index.root.name, "path": str(self.index.root),
+        return {"name": self.repository_label or self.index.root.name, "path": str(self.index.root),
                 "files": [{"id": file.id, "path": file.path,
                            "analyzed": file.id in self.index.files,
                            "symbols": [symbol.summary() for symbol in getattr(file, "definitions", ())],
@@ -117,6 +136,65 @@ class AppState:
                 "analyzed_count": len(self.index.files),
                 "edge_count": len(self.index.edges), "warnings": self.index.warnings,
                 "snapshot": self.index.snapshot}
+
+    def import_uploaded(self, files: list[dict]) -> tuple[object, dict]:
+        if not files or len(files) > MAX_BROWSE_FILES:
+            raise RepoLensError(f"请选择不超过 {MAX_BROWSE_FILES} 个文件的目录。")
+        total = 0
+        root_name = "上传项目"
+        staging = self.upload_root
+        for child in staging.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        try:
+            for item in files:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("content"), str):
+                    raise RepoLensError("目录文件数据无效，请重新选择。")
+                raw_path = item["path"].replace("\\", "/")
+                parts = [part for part in raw_path.split("/") if part]
+                if not parts or any(part in {".", ".."} for part in parts):
+                    raise RepoLensError("目录包含无效的文件路径。")
+                if len(parts) > 1:
+                    root_name = root_name if root_name != "上传项目" else parts[0]
+                    parts = parts[1:]
+                relative = Path(*parts)
+                if relative.is_absolute() or relative.name == "":
+                    raise RepoLensError("目录包含无效的文件路径。")
+                content = item["content"]
+                encoded_size = len(content.encode("utf-8"))
+                if encoded_size > MAX_FILE_BYTES or total + encoded_size > MAX_BROWSE_BYTES:
+                    raise RepoLensError(f"上传内容不能超过 {MAX_BROWSE_BYTES // 1_000_000} MB。")
+                target = staging / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                encoded = content.encode("utf-8")
+                for attempt in range(3):
+                    try:
+                        with target.open("wb") as stream:
+                            stream.write(encoded)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+                total += encoded_size
+            candidate_index = scan_repository(staging)
+            candidate_graph = dependency_preview(candidate_index)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        self.index, self.graph, self.repository_label = candidate_index, candidate_graph, root_name
+        LOGGER.info("repository.upload name=%s files=%d bytes=%d edges=%d", root_name,
+                    len(candidate_index.documents), total, len(candidate_index.edges))
+        return candidate_index, candidate_graph
+
+    def cleanup_uploads(self) -> None:
+        for child in self.upload_root.iterdir() if self.upload_root.exists() else ():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
 
 
 class LocalServer(ThreadingHTTPServer):
@@ -128,13 +206,17 @@ class LocalServer(ThreadingHTTPServer):
         self.token = secrets.token_urlsafe(32)
         self.origin = f"http://127.0.0.1:{self.server_address[1]}"
 
+    def server_close(self):
+        self.state.cleanup_uploads()
+        super().server_close()
+
 
 class Handler(BaseHTTPRequestHandler):
     server: LocalServer
 
     def log_message(self, _format, *args):
-        # Never log request bodies, source text, API keys or remote responses.
-        pass
+        # Request bodies, source text, API keys and remote responses never enter logs.
+        LOGGER.info("http.request method=%s path=%s", self.command, urlsplit(self.path).path)
 
     def _send(self, status: int, payload: bytes, content_type="application/json; charset=utf-8", cookie=False):
         self.send_response(status)
@@ -170,14 +252,14 @@ class Handler(BaseHTTPRequestHandler):
             if not secrets.compare_digest(token, self.server.token):
                 raise RepoLensError("本地会话已过期，请刷新页面。", 403)
 
-    def _body(self) -> dict:
+    def _body(self, max_bytes: int = 16_384) -> dict:
         if self.headers.get_content_type() != "application/json":
             raise RepoLensError("请求必须为 JSON。", 415)
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             raise RepoLensError("请求长度无效。") from None
-        if not 0 < length <= 16_384:
+        if not 0 < length <= max_bytes:
             raise RepoLensError("请求内容过大或为空。", 413)
         try:
             result = json.loads(self.rfile.read(length))
@@ -189,6 +271,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self):
         path = urlsplit(self.path).path
+        request_started = time.monotonic()
+        LOGGER.info("route.start method=%s path=%s", self.command, path)
         self._authorize(api=path.startswith("/api/"))
         state = self.server.state
         if self.command == "GET" and path == "/favicon.ico":
@@ -216,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.command != "POST":
             raise RepoLensError("接口不存在。", 404)
-        body = self._body()
+        body = self._body(8 * 1024 * 1024 if path == "/api/repository/upload" else 16_384)
         if path == "/api/repository/pick":
             state.begin_picker()
             self._json(202, {"pending": True})
@@ -237,10 +321,12 @@ class Handler(BaseHTTPRequestHandler):
                     # Don't leave an older saved key active after a memory-only update.
                     credentials.delete_key()
                 state.api_key, state.saved, state.key_error = key, remember, None
+                LOGGER.info("key.configured saved=%s", remember)
                 self._json(200, {"key_configured": True, "key_saved": remember})
             elif path == "/api/key/delete":
                 credentials.delete_key()
                 state.api_key, state.saved, state.key_error = None, False, None
+                LOGGER.info("key.deleted")
                 self._json(200, {"key_configured": False, "key_saved": False})
             elif path in ("/api/repository", "/api/example"):
                 state.phase = "正在建立 Python 索引……"
@@ -253,6 +339,16 @@ class Handler(BaseHTTPRequestHandler):
                 candidate_index = scan_repository(root)
                 candidate_graph = dependency_preview(candidate_index)
                 state.index, state.graph = candidate_index, candidate_graph
+                LOGGER.info("repository.import name=%s files=%d edges=%d elapsed_ms=%d",
+                            Path(root).name, len(candidate_index.documents), len(candidate_index.edges),
+                            int((time.monotonic() - request_started) * 1000))
+                self._json(200, {"repository": state.repository_summary(), "graph": state.graph})
+            elif path == "/api/repository/upload":
+                files = body.get("files")
+                if not isinstance(files, list):
+                    raise RepoLensError("请选择一个项目目录后再导入。")
+                state.phase = "正在读取浏览器选择的项目……"
+                state.import_uploaded(files)
                 self._json(200, {"repository": state.repository_summary(), "graph": state.graph})
             elif path == "/api/analyze":
                 if body.get("confirmed") is not True:
@@ -260,9 +356,16 @@ class Handler(BaseHTTPRequestHandler):
                 if state.index is None or not state.api_key:
                     raise RepoLensError("请先导入仓库并配置 DeepSeek API Key。")
                 client = state.client_factory(state.api_key, model=body.get("model", DEFAULT_MODEL))
+                model_name = getattr(client, "model", body.get("model", DEFAULT_MODEL))
+                LOGGER.info("analysis.start model=%s goal_chars=%d files=%d",
+                            model_name, len(body.get("goal", "")) if isinstance(body.get("goal", ""), str) else -1,
+                            len(state.index.files))
                 graph = analyze(state.index, body.get("goal", ""), client,
                                 lambda message: setattr(state, "phase", message))
                 state.graph = graph
+                LOGGER.info("analysis.complete model=%s requests=%d tokens=%d elapsed_ms=%d",
+                            model_name, graph["usage"]["requests"], graph["usage"]["total_tokens"],
+                            int((time.monotonic() - request_started) * 1000))
                 self._json(200, {"graph": graph})
             else:
                 raise RepoLensError("接口不存在。", 404)
@@ -274,10 +377,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch()
         except RepoLensError as exc:
+            LOGGER.warning("route.failed status=%d error=%s", exc.status, error_text(exc))
             self._json(exc.status, {"error": str(exc)})
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception:
+            LOGGER.exception("route.unhandled")
             self._json(500, {"error": "本地处理失败，请检查目录后重试或重新启动。"})
 
     do_GET = _handle
@@ -285,6 +390,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    log_path = configure_logging()
     parser = argparse.ArgumentParser(description="RepoLens 最小 DeepSeek 试用版")
     parser.add_argument("--repo", help="启动时导入的 Python 仓库；默认使用内置示例")
     parser.add_argument("--port", type=int, default=0, help="本机端口，默认随机")
@@ -296,6 +402,8 @@ def main():
         state = AppState(args.repo or PROJECT_ROOT / "samples" / "mini_project")
         with LocalServer(args.port, state) as server:
             print(f"RepoLens: {server.origin}", flush=True)
+            print(f"日志文件: {log_path or '仅终端输出'}", flush=True)
+            LOGGER.info("server.started origin=%s log=%s", server.origin, log_path or "console")
             print("仅本机访问；Ctrl+C 退出。API Key 请在页面输入，不要放入命令行。", flush=True)
             if args.open:
                 webbrowser.open(server.origin)
@@ -303,4 +411,5 @@ def main():
     except RepoLensError as exc:
         parser.exit(1, f"{exc}\n")
     except KeyboardInterrupt:
+        LOGGER.info("server.stopped reason=keyboard_interrupt")
         print("\nRepoLens 已停止。", flush=True)

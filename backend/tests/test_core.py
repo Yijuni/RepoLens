@@ -317,6 +317,18 @@ class ServerTests(RepositoryCase):
         else:
             self.fail("directory picker cancellation was not reported")
 
+    def test_browser_directory_upload_creates_local_snapshot(self):
+        result = self.call("/api/repository/upload", {"files": [
+            {"path": "upload_demo/main.py", "content": "from helper import run\nrun()\n"},
+            {"path": "upload_demo/helper.py", "content": "def run():\n    return 1\n"},
+            {"path": "upload_demo/README.md", "content": "# uploaded\n"},
+        ]})
+        self.assertEqual(result["repository"]["name"], "upload_demo")
+        self.assertEqual(len(result["repository"]["files"]), 3)
+        self.assertEqual(len(result["graph"]["edges"]), 1)
+        source_id = next(item["id"] for item in result["repository"]["files"] if item["path"] == "helper.py")
+        self.assertIn("def run", self.call("/api/source?id=" + source_id)["content"])
+
 
 @unittest.skipUnless(os.name == "nt", "Windows credential API")
 class CredentialTests(unittest.TestCase):
@@ -334,6 +346,7 @@ class CredentialTests(unittest.TestCase):
 class DirectoryDialogTests(unittest.TestCase):
     def test_cancel_does_not_open_a_second_dialog(self):
         with patch.object(dialogs.shutil, "which", return_value="powershell.exe"), \
+             patch.object(dialogs, "_python_directory", return_value=None), \
              patch.object(dialogs, "_powershell_directory", return_value=None), \
              patch.object(dialogs.ctypes, "WinDLL") as fallback:
             self.assertIsNone(dialogs.choose_directory())

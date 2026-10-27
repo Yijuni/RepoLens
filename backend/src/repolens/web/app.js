@@ -32,7 +32,7 @@ function keyState(configured, saved) {
 async function task(action, message = '正在处理…') {
   if (busy) return;
   busy = true; notice(''); $('progress').textContent = message;
-  const controls = ['pick-directory', 'import', 'example', 'refresh', 'analyze', 'save-key', 'delete-key'];
+  const controls = ['pick-directory', 'folder-input', 'import', 'example', 'refresh', 'analyze', 'save-key', 'delete-key'];
   for (const id of controls) $(id).disabled = true;
   const timer = setInterval(async () => {
     try { const state = await api('/api/state'); if (state.busy) $('progress').textContent = state.phase; } catch { /* The active request reports connection errors. */ }
@@ -159,25 +159,29 @@ async function imported(result) {
 }
 $('path-toggle').addEventListener('click', () => { $('path-form').hidden = !$('path-form').hidden; $('path-toggle').setAttribute('aria-expanded', !$('path-form').hidden); if (!$('path-form').hidden) $('repo-path').focus(); });
 $('path-form').addEventListener('submit', e => { e.preventDefault(); task(async () => { if (!$('repo-path').value.trim()) throw new Error('请输入项目完整路径。'); await imported(await api('/api/repository', { path: $('repo-path').value.trim() })); }, '正在导入项目…'); });
-async function pickDirectory() {
-  await api('/api/repository/pick', {});
-  for (let attempt = 0; attempt < 1200; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 250));
-    const result = await api('/api/repository/pick/status');
-    if (result.pending) {
-      if (attempt % 4 === 0) $('progress').textContent = '等待目录选择…';
-      continue;
-    }
-    if (result.error) throw new Error(result.error);
-    await imported(result);
-    return;
+async function uploadFolder(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  if (files.length > 400) throw new Error('试用版最多导入 400 个文本文件。');
+  const selected = [];
+  let bytes = 0;
+  for (const file of files) {
+    const path = file.webkitRelativePath || file.name;
+    const suffix = path.toLowerCase().split('.').pop();
+    const supported = ['py','md','txt','json','toml','yaml','yml','ini','cfg','js','jsx','ts','tsx','html','css','sql','rs','go','java','c','h','cpp','hpp'].includes(suffix);
+    if (!supported || file.size > 100000) continue;
+    bytes += file.size;
+    if (bytes > 4000000) throw new Error('所选文本内容超过 4 MB，请选择更小的项目目录。');
+    selected.push({ path, content: await file.text() });
   }
-  throw new Error('目录选择等待超时；可以关闭对话框后使用“输入路径”。');
+  if (!selected.length) throw new Error('目录中没有可浏览的文本文件。');
+  await imported(await api('/api/repository/upload', { files: selected }));
 }
-$('pick-directory').addEventListener('click', () => task(async () => {
-  notice('目录选择器已打开；选择完成或取消后会返回工作区。');
-  await pickDirectory();
-}, '打开 Windows 目录选择器…'));
+$('pick-directory').addEventListener('click', () => $('folder-input').click());
+$('folder-input').addEventListener('change', () => task(async () => {
+  await uploadFolder($('folder-input').files);
+  $('folder-input').value = '';
+}, '正在导入所选项目…'));
 $('example').addEventListener('click', () => task(async () => imported(await api('/api/example', {})), '正在打开示例…'));
 $('refresh').addEventListener('click', () => task(async () => { if (!repository) throw new Error('请先打开一个项目。'); await imported(await api('/api/repository', { path: repository.path })); }, '正在重新索引…'));
 $('file-filter').addEventListener('input', renderTree);

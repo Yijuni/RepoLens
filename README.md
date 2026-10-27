@@ -8,7 +8,7 @@
 
 - 只读索引 Python 文件、顶层类/函数与 import，不执行目标代码。
 - 自动布局文件依赖图，支持分组折叠、节点拖拽、画布平移/缩放与只读源码查看。
-- Windows 可通过目录选择器导入项目；左侧文件树可展开目录、文件、类和函数，点击后定位真实源码行。
+- 浏览器可通过目录选择器导入文本项目快照；左侧文件树可展开目录、文件、类和函数，点击后定位真实源码行。也可输入本机完整路径直接索引。
 - 当前使用 DeepSeek 生成项目说明、模块摘要和语义分组；模型接入层预留后续扩展其他模型。
 - 按真实索引校验模型节点和依赖，拒绝编造的源码引用。
 - 无 Key 也可使用本地依赖预览，内置四文件示例。
@@ -64,6 +64,8 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 
 服务只绑定 127.0.0.1，并检查会话与请求来源，不应暴露到公网。
 
+服务器运行日志同时输出到启动终端，并写入 `%LOCALAPPDATA%\\RepoLens\\logs\\server.log`；若该目录不可写，会回退到项目内被忽略的 `.repolens/logs/server.log`。日志经过脱敏，不包含 API Key、源码正文或请求内容。
+
 ## 代码结构
 
 | 模块 | 职责 |
@@ -75,6 +77,7 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 | [prompts](backend/src/repolens/prompts/README.md) | 版本化模型指令 |
 | [platform](backend/src/repolens/platform/README.md) | Windows 凭据存储 |
 | [server](backend/src/repolens/server/README.md) | 本地 API |
+| [diagnostics](backend/src/repolens/diagnostics/README.md) | 脱敏运行日志 |
 | [web](backend/src/repolens/web/README.md) | 图与源码工作台 |
 
 ## 测试

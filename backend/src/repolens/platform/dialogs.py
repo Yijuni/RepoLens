@@ -3,8 +3,10 @@
 import ctypes
 from ctypes import wintypes
 import os
+from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from repolens.errors import RepoLensError
 
@@ -14,6 +16,32 @@ class _BrowseInfo(ctypes.Structure):
                 ("pszDisplayName", wintypes.LPWSTR), ("lpszTitle", wintypes.LPCWSTR),
                 ("ulFlags", wintypes.UINT), ("lpfn", ctypes.c_void_p),
                 ("lParam", wintypes.LPARAM), ("iImage", ctypes.c_int)]
+
+
+def _python_directory() -> str | None:
+    """Use a GUI-subsystem Python process so the chooser is visible to the user."""
+    executable = Path(sys.executable)
+    pythonw = executable.with_name("pythonw.exe")
+    if not pythonw.exists():
+        return None
+    code = (
+        "import tkinter as tk; from tkinter import filedialog; "
+        "root=tk.Tk(); root.withdraw(); root.attributes('-topmost', True); "
+        "value=filedialog.askdirectory(title='选择要以只读方式浏览的项目目录', mustexist=True); "
+        "print(value, flush=True); root.destroy()"
+    )
+    try:
+        result = subprocess.run(
+            [str(pythonw), "-c", code], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            encoding="utf-8", errors="replace", timeout=300, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 def _powershell_directory() -> str | None:
@@ -48,8 +76,10 @@ def choose_directory() -> str | None:
     if os.name != "nt":
         raise RepoLensError("目录选择器仅支持 Windows，请输入项目的完整路径。")
     # Keep the modal UI out of the HTTP worker's desktop/thread context.
+    # None is a real user cancellation; do not open a second modal dialog.
+    if Path(sys.executable).with_name("pythonw.exe").exists():
+        return _python_directory()
     if shutil.which("powershell.exe"):
-        # None is a real user cancellation; do not open a second modal dialog.
         return _powershell_directory()
     shell = ctypes.WinDLL("shell32", use_last_error=True)
     ole = ctypes.OleDLL("ole32")
