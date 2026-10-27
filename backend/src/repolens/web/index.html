@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RepoLens · 看见代码之间的联系</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">R</span> RepoLens <span class="version">最小试用版</span></a>
+    <span class="local-indicator"><i></i> 本地工作空间</span>
+  </header>
+  <main class="workspace">
+    <aside class="sidebar">
+      <section class="section">
+        <p class="eyebrow">01 / 导入</p>
+        <h1>从一个仓库开始</h1>
+        <p class="muted">先建立结构，再探索模块之间的联系。</p>
+        <label for="repo-path">Python 仓库目录</label>
+        <input id="repo-path" placeholder="E:\projects\my-project" autocomplete="off">
+        <div class="button-row"><button id="import" class="secondary">导入目录</button><button id="example" class="text-button">使用示例</button></div>
+      </section>
+      <section class="section">
+        <p class="eyebrow">02 / 理解</p>
+        <label for="goal">这次想了解什么？</label>
+        <textarea id="goal" rows="3" maxlength="1000" placeholder="例如：这个项目从哪里开始，数据经过哪些模块？"></textarea>
+        <label for="model">DeepSeek 模型</label>
+        <input id="model" maxlength="100" value="deepseek-flash" autocomplete="off">
+        <details class="settings"><summary>API Key <span id="key-state">未配置</span></summary>
+          <label for="api-key">DeepSeek API Key</label>
+          <input id="api-key" type="password" maxlength="1024" autocomplete="off" placeholder="仅发送到 DeepSeek 官方接口">
+          <label class="check"><input id="remember" type="checkbox">保存到 Windows 凭据管理器</label>
+          <div class="button-row"><button id="save-key" class="secondary">设置 Key</button><button id="delete-key" class="text-button">清除</button></div>
+        </details>
+        <div class="privacy"><strong>本次发送范围</strong><p>最多 40 个文件的相对路径、顶层符号名与 import 摘要，以及学习目标。源码正文留在本机。</p>
+          <label class="check"><input id="consent" type="checkbox">同意将当前摘要发送至 DeepSeek</label>
+        </div>
+        <button id="analyze" class="primary">用 DeepSeek 理解项目 <span>↗</span></button>
+        <p class="tiny">每次最多 2 个请求，累计上限 32,000 token。</p>
+      </section>
+      <section class="file-section"><div class="section-heading"><span>仓库文件</span><span id="file-count" class="pill">0</span></div><div id="file-list"></div></section>
+    </aside>
+    <section class="main-panel">
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+      <div class="canvas-header"><div><p class="eyebrow">PROJECT MAP</p><h2 id="project-name">项目模块图</h2></div><span id="mode" class="mode">尚未导入</span></div>
+      <div class="graph-toolbar"><span><i class="line-legend"></i> 静态 import · 箭头指向被导入方</span><div class="zoom"><button id="zoom-out" title="缩小" aria-label="缩小">−</button><button id="zoom-fit">适应画布</button><button id="zoom-in" title="放大" aria-label="放大">+</button></div></div>
+      <div id="graph-scroll" class="graph-scroll"><svg id="graph" role="img" aria-label="项目文件依赖图"></svg><div id="graph-empty" class="empty"><span>⌘</span><h3>让项目结构变得清晰</h3><p>导入 Python 仓库，或使用左侧示例。</p></div></div>
+      <footer class="graph-footer"><span id="graph-stats">0 个文件 · 0 条依赖</span><span id="progress" aria-live="polite">就绪</span></footer>
+      <section class="overview"><p class="eyebrow">OVERVIEW</p><h3 id="project-type">先看结构，再读细节</h3><p id="project-summary">导入后立即显示本地依赖预览；配置 Key 后可请求 DeepSeek 解释模块职责。</p><p id="usage" class="tiny"></p></section>
+    </section>
+    <aside class="inspector"><div class="inspector-heading"><p class="eyebrow">SOURCE EXPLORER</p><h2 id="source-title">源码核对</h2><p id="source-anchor" class="tiny">点击文件或图节点，打开只读源码</p></div><p id="node-summary" class="node-summary">图中的每个节点都来自实际索引，文件与行号由本地验证。</p><div id="source" class="source"><div class="source-placeholder">选择一个节点<br><span>在这里建立图与代码的联系</span></div></div></aside>
+  </main>
+</body>
+</html>

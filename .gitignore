@@ -1,0 +1,58 @@
+# Local secrets; commit only templates with placeholder values.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Python environments and caches.
+.conda/
+.conda-pkgs/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# JavaScript / TypeScript dependencies and outputs.
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Rust / Tauri and frozen backend outputs.
+target/
+build/
+/src-tauri/binaries/
+/src-tauri/gen/
+
+# Local RepoLens data, indexes and logs.
+.repolens/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+logs/
+
+# Editor and Windows temporary files.
+.idea/
+.vs/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
