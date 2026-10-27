@@ -1,4 +1,4 @@
-"""DeepSeek-only transport. All errors deliberately omit remote response bodies."""
+"""Current DeepSeek transport; keep the client boundary provider-extensible."""
 
 from dataclasses import dataclass
 import json

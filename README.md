@@ -1,6 +1,6 @@
 # RepoLens
 
-一个帮助理解 Python 代码仓库的本地工具：查看文件依赖，用 DeepSeek 解释模块职责，点击图节点核对源码。
+一个帮助理解 Python 代码仓库的本地工具：查看文件依赖，用模型解释模块职责，点击图节点核对源码。
 
 当前为早期原型，支持 Windows 和 Python 项目。
 
@@ -8,7 +8,7 @@
 
 - 只读索引 Python 文件、顶层类/函数与 import，不执行目标代码。
 - 自动布局文件依赖图，支持节点选择、缩放与只读源码查看。
-- 使用 DeepSeek 生成项目说明、模块摘要和语义分组。
+- 当前使用 DeepSeek 生成项目说明、模块摘要和语义分组；模型接入层预留后续扩展其他模型。
 - 按真实索引校验模型节点和依赖，拒绝编造的源码引用。
 - 无 Key 也可使用本地依赖预览，内置四文件示例。
 - Key 可仅在内存使用，或保存到 Windows 凭据管理器。
@@ -45,7 +45,7 @@ conda create --prefix .\.conda --file conda-win-64.lock.txt
 python -X utf8 backend/run.py --repo 'E:\projects\my-project' --open
 ```
 
-## 使用 DeepSeek
+## 使用模型（当前支持 DeepSeek）
 
 1. 导入 Python 目录，检查文件列表和本地依赖预览。
 2. 展开 API Key 设置，输入有效 Key 后点击“设置 Key”。
@@ -53,7 +53,7 @@ python -X utf8 backend/run.py --repo 'E:\projects\my-project' --open
 4. 点击“用 DeepSeek 理解项目”，等待通过校验的模块图与说明。
 5. 点击节点核对源码；目标文件修改后须重新导入。
 
-默认模型 deepseek-flash，可根据账户修改。仅请求 DeepSeek 官方接口。每次最多 2 次请求、累计预算 32,000 token，单次超时 60 秒。
+当前接入 DeepSeek，默认模型为 deepseek-flash，可根据账户修改。每次最多 2 次请求、累计预算 32,000 token，单次超时 60 秒。后续模型接入会复用同一分析流程和图校验机制。
 
 ## 数据与隐私
 
@@ -70,7 +70,7 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 | [indexing](backend/src/repolens/indexing/README.md) | Python AST 索引与快照 |
 | [contracts](backend/src/repolens/contracts/README.md) | 图 schema 与证据校验 |
 | [analysis](backend/src/repolens/analysis/README.md) | 有预算限制的模型分析 |
-| [llm](backend/src/repolens/llm/README.md) | DeepSeek 客户端 |
+| [llm](backend/src/repolens/llm/README.md) | 当前模型客户端与后续 provider 扩展入口 |
 | [prompts](backend/src/repolens/prompts/README.md) | 版本化模型指令 |
 | [platform](backend/src/repolens/platform/README.md) | Windows 凭据存储 |
 | [server](backend/src/repolens/server/README.md) | 本地 API |
