@@ -7,7 +7,7 @@ from urllib import error, request
 
 from repolens.errors import RepoLensError
 
-DEFAULT_MODEL = "deepseek-flash"
+DEFAULT_MODEL = "deepseek-chat"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
 
 

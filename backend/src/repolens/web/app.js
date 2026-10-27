@@ -8,11 +8,16 @@ const view = new GraphView($('graph'), id => openSource(id));
 
 async function api(path, body) {
   let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), path === '/api/analyze' ? 75000 : 20000);
   try {
     response = await fetch(path, body === undefined ? {} : {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal,
     });
-  } catch { throw new Error('无法连接本地服务，请检查服务是否仍在运行。'); }
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error(path === '/api/analyze' ? '模型请求超过 75 秒，已停止等待；请检查模型名、网络和余额后重试。' : '本地操作超时，请关闭选择器后重试。');
+    throw new Error('无法连接本地服务，请检查服务是否仍在运行。');
+  } finally { clearTimeout(timeout); }
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || '请求失败，请重试。');
   return value;
@@ -154,7 +159,25 @@ async function imported(result) {
 }
 $('path-toggle').addEventListener('click', () => { $('path-form').hidden = !$('path-form').hidden; $('path-toggle').setAttribute('aria-expanded', !$('path-form').hidden); if (!$('path-form').hidden) $('repo-path').focus(); });
 $('path-form').addEventListener('submit', e => { e.preventDefault(); task(async () => { if (!$('repo-path').value.trim()) throw new Error('请输入项目完整路径。'); await imported(await api('/api/repository', { path: $('repo-path').value.trim() })); }, '正在导入项目…'); });
-$('pick-directory').addEventListener('click', () => task(async () => { notice('已请求 Windows 目录选择器；选择文件夹后将自动导入。'); await imported(await api('/api/repository/pick', {})); if (!graph?.warnings.length && !$('notice').textContent.includes('取消')) notice(''); }, '请在 Windows 目录选择器中选择项目…'));
+async function pickDirectory() {
+  await api('/api/repository/pick', {});
+  for (let attempt = 0; attempt < 1200; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const result = await api('/api/repository/pick/status');
+    if (result.pending) {
+      if (attempt % 4 === 0) $('progress').textContent = '等待目录选择…';
+      continue;
+    }
+    if (result.error) throw new Error(result.error);
+    await imported(result);
+    return;
+  }
+  throw new Error('目录选择等待超时；可以关闭对话框后使用“输入路径”。');
+}
+$('pick-directory').addEventListener('click', () => task(async () => {
+  notice('目录选择器已打开；选择完成或取消后会返回工作区。');
+  await pickDirectory();
+}, '打开 Windows 目录选择器…'));
 $('example').addEventListener('click', () => task(async () => imported(await api('/api/example', {})), '正在打开示例…'));
 $('refresh').addEventListener('click', () => task(async () => { if (!repository) throw new Error('请先打开一个项目。'); await imported(await api('/api/repository', { path: repository.path })); }, '正在重新索引…'));
 $('file-filter').addEventListener('input', renderTree);

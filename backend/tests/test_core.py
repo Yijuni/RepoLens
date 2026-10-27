@@ -19,6 +19,7 @@ from repolens.errors import RepoLensError
 from repolens.indexing import scan_repository
 from repolens.llm import Completion, DeepSeekClient, ENDPOINT
 from repolens import platform as credentials
+from repolens.platform import dialogs
 from repolens.server import AppState, LocalServer
 
 
@@ -294,10 +295,27 @@ class ServerTests(RepositoryCase):
 
     def test_directory_picker_import_and_cancel(self):
         self.state.directory_picker = lambda: str(self.root)
-        result = self.call("/api/repository/pick", {})
-        self.assertEqual(result["repository"]["path"], str(self.root.resolve()))
+        self.assertEqual(self.call("/api/repository/pick", {}), {"pending": True})
+        for _ in range(20):
+            with self.opener.open(request.Request(self.server.origin + "/api/repository/pick/status")) as response:
+                result = json.load(response)
+            if result.get("repository", {}).get("path") == str(self.root.resolve()):
+                break
+            import time
+            time.sleep(0.01)
+        else:
+            self.fail("directory picker result was not committed")
         self.state.directory_picker = lambda: None
-        self.assertEqual(self.call("/api/repository/pick", {}), {"cancelled": True})
+        self.assertEqual(self.call("/api/repository/pick", {}), {"pending": True})
+        for _ in range(20):
+            with self.opener.open(request.Request(self.server.origin + "/api/repository/pick/status")) as response:
+                status = json.load(response)
+            if status.get("cancelled"):
+                break
+            import time
+            time.sleep(0.01)
+        else:
+            self.fail("directory picker cancellation was not reported")
 
 
 @unittest.skipUnless(os.name == "nt", "Windows credential API")
@@ -310,6 +328,16 @@ class CredentialTests(unittest.TestCase):
             finally:
                 credentials.delete_key()
             self.assertIsNone(credentials.load_key())
+
+
+@unittest.skipUnless(os.name == "nt", "Windows directory picker")
+class DirectoryDialogTests(unittest.TestCase):
+    def test_cancel_does_not_open_a_second_dialog(self):
+        with patch.object(dialogs.shutil, "which", return_value="powershell.exe"), \
+             patch.object(dialogs, "_powershell_directory", return_value=None), \
+             patch.object(dialogs.ctypes, "WinDLL") as fallback:
+            self.assertIsNone(dialogs.choose_directory())
+            fallback.assert_not_called()
 
 
 if __name__ == "__main__":

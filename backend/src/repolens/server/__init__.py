@@ -29,6 +29,11 @@ class AppState:
         self.index = scan_repository(repository) if repository else None
         self.graph = dependency_preview(self.index) if self.index else None
         self.lock = threading.Lock()
+        self.picker_lock = threading.Lock()
+        self.picker_thread = None
+        self.picker_result = None
+        self.picker_error = None
+        self.picker_cancelled = False
         self.phase = "就绪"
         self.api_key = None
         self.saved = False
@@ -45,8 +50,61 @@ class AppState:
     def summary(self) -> dict:
         return {"key_configured": bool(self.api_key), "key_saved": self.saved,
                 "key_error": self.key_error, "default_model": DEFAULT_MODEL,
-                "busy": self.lock.locked(), "phase": self.phase,
+                "busy": self.lock.locked() or self.picker_pending(), "phase": self.phase,
                 "repository": self.repository_summary(), "graph": self.graph}
+
+    def picker_pending(self) -> bool:
+        return bool(self.picker_thread and self.picker_thread.is_alive())
+
+    def begin_picker(self) -> None:
+        with self.picker_lock:
+            if self.lock.locked() or self.picker_pending():
+                raise RepoLensError("当前已有导入或分析任务，请等待完成。", 409)
+            self.picker_result = None
+            self.picker_error = None
+            self.picker_cancelled = False
+            self.phase = "请在 Windows 目录选择器中选择项目……"
+            self.picker_thread = threading.Thread(target=self._pick_worker, daemon=True)
+            self.picker_thread.start()
+
+    def _pick_worker(self) -> None:
+        try:
+            root = self.directory_picker()
+            if root is None:
+                with self.picker_lock:
+                    self.picker_cancelled = True
+                return
+            candidate_index = scan_repository(root)
+            candidate_graph = dependency_preview(candidate_index)
+            with self.picker_lock:
+                self.picker_result = (candidate_index, candidate_graph)
+        except RepoLensError as exc:
+            with self.picker_lock:
+                self.picker_error = str(exc)
+        except Exception:
+            with self.picker_lock:
+                self.picker_error = "无法完成目录选择，请改用输入路径或重新启动。"
+        finally:
+            self.phase = "就绪"
+
+    def picker_status(self) -> dict:
+        with self.picker_lock:
+            pending = self.picker_pending()
+            if pending:
+                return {"pending": True}
+            if self.picker_error:
+                error = self.picker_error
+                self.picker_error = None
+                return {"pending": False, "error": error}
+            if self.picker_cancelled:
+                self.picker_cancelled = False
+                return {"pending": False, "cancelled": True}
+            if self.picker_result:
+                candidate_index, candidate_graph = self.picker_result
+                self.index, self.graph = candidate_index, candidate_graph
+                self.picker_result = None
+                return {"pending": False, "repository": self.repository_summary(), "graph": self.graph}
+            return {"pending": False}
 
     def repository_summary(self) -> dict | None:
         if self.index is None:
@@ -147,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/api/state":
             self._json(200, state.summary())
             return
+        if self.command == "GET" and path == "/api/repository/pick/status":
+            self._json(200, state.picker_status())
+            return
         if self.command == "GET" and path == "/api/source":
             if not state.index:
                 raise RepoLensError("请先导入 Python 仓库。")
@@ -156,6 +217,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "POST":
             raise RepoLensError("接口不存在。", 404)
         body = self._body()
+        if path == "/api/repository/pick":
+            state.begin_picker()
+            self._json(202, {"pending": True})
+            return
+        if state.picker_pending():
+            raise RepoLensError("目录选择正在进行，请先完成或取消选择。", 409)
         if not state.lock.acquire(blocking=False):
             raise RepoLensError("当前任务正在执行，请等待完成。", 409)
         try:
@@ -175,16 +242,10 @@ class Handler(BaseHTTPRequestHandler):
                 credentials.delete_key()
                 state.api_key, state.saved, state.key_error = None, False, None
                 self._json(200, {"key_configured": False, "key_saved": False})
-            elif path in ("/api/repository", "/api/example", "/api/repository/pick"):
+            elif path in ("/api/repository", "/api/example"):
                 state.phase = "正在建立 Python 索引……"
                 if path == "/api/example":
                     root = PROJECT_ROOT / "samples" / "mini_project"
-                elif path == "/api/repository/pick":
-                    state.phase = "请在 Windows 目录选择器中选择项目……"
-                    root = state.directory_picker()
-                    if root is None:
-                        self._json(200, {"cancelled": True})
-                        return
                 else:
                     root = body.get("path")
                     if not isinstance(root, str) or not root.strip():

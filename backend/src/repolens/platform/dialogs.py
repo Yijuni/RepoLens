@@ -3,6 +3,8 @@
 import ctypes
 from ctypes import wintypes
 import os
+import shutil
+import subprocess
 
 from repolens.errors import RepoLensError
 
@@ -14,9 +16,41 @@ class _BrowseInfo(ctypes.Structure):
                 ("lParam", wintypes.LPARAM), ("iImage", ctypes.c_int)]
 
 
+def _powershell_directory() -> str | None:
+    """Open an interactive dialog in a separate STA process."""
+    executable = shutil.which("powershell.exe")
+    if not executable:
+        return None
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$dialog.Description = '选择要以只读方式浏览的项目目录'; "
+        "$dialog.ShowNewFolderButton = $false; "
+        "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "[Console]::WriteLine($dialog.SelectedPath) }"
+    )
+    try:
+        result = subprocess.run(
+            [executable, "-NoLogo", "-NoProfile", "-STA", "-Command", script],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", timeout=300, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def choose_directory() -> str | None:
     if os.name != "nt":
         raise RepoLensError("目录选择器仅支持 Windows，请输入项目的完整路径。")
+    # Keep the modal UI out of the HTTP worker's desktop/thread context.
+    if shutil.which("powershell.exe"):
+        # None is a real user cancellation; do not open a second modal dialog.
+        return _powershell_directory()
     shell = ctypes.WinDLL("shell32", use_last_error=True)
     ole = ctypes.OleDLL("ole32")
     ole.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]

@@ -54,7 +54,7 @@ python -X utf8 backend/run.py --repo 'E:\projects\my-project' --open
 4. 点击“用 DeepSeek 理解项目”，等待通过校验的模块图与说明。
 5. 点击节点核对源码；目标文件修改后须重新导入。
 
-当前接入 DeepSeek，默认模型为 deepseek-flash，可根据账户修改。每次最多 2 次请求、累计预算 32,000 token，单次超时 60 秒。后续模型接入会复用同一分析流程和图校验机制。
+当前接入 DeepSeek，默认模型为 `deepseek-chat`；可在模型设置中填写账户可用的其它模型。每次最多 2 次请求、累计预算 32,000 token，单次超时 60 秒。后续模型接入会复用同一分析流程和图校验机制。
 
 ## 数据与隐私
 
