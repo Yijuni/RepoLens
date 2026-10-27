@@ -6,4 +6,4 @@
 
 未勾选保存时只在服务内存中使用。重新设置临时 Key 会删除此前保存的正式凭据，避免下次启动使用旧值。“清除”同时移除内存值与正式凭据。非 Windows 不支持持久保存。
 
-验证：CredentialTests 对独立随机 RepoLens/Test 目标执行虚拟凭据往返，并在 finally 清理，不覆盖正式目标。运行方式见 [服务说明](../../../../README.md)。当前仅支持一个账户。
+验证：CredentialTests 对独立随机 RepoLens/Test 目标执行虚拟凭据往返，并在 finally 清理，不覆盖正式目标。`choose_directory()` 通过 Windows Shell 的显式目录选择器返回用户选择的目录，取消时返回 `None`，不执行目标目录内容。运行方式见 [服务说明](../../../../README.md)。当前仅支持一个账户。

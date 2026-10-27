@@ -1,230 +1,188 @@
-"use strict";
+﻿import { GraphView } from './graph.mjs';
+import { renderSource } from './source.mjs';
 
-const $ = (id) => document.getElementById(id);
-let graph = null;
-let repository = null;
-let selected = null;
-let zoom = 1;
-let dimensions = { width: 600, height: 400 };
-let busy = false;
-let sourceRequest = 0;
-const SVG_NS = "http://www.w3.org/2000/svg";
+const $ = id => document.getElementById(id);
+let repository = null, graph = null, selection = null, sourceRequest = 0, busy = false;
+const expanded = new Set();
+const view = new GraphView($('graph'), id => openSource(id));
 
 async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+  } catch { throw new Error('无法连接本地服务，请检查服务是否仍在运行。'); }
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error || "请求失败，请重试。");
+  if (!response.ok) throw new Error(value.error || '请求失败，请重试。');
   return value;
 }
-
 function notice(message, error = false) {
-  $("notice").textContent = message;
-  $("notice").className = error ? "error" : "";
-  $("notice").hidden = !message;
+  $('notice').textContent = message; $('notice').className = error ? 'error' : ''; $('notice').hidden = !message;
 }
-
-function setBusy(value) {
-  busy = value;
-  for (const id of ["import", "example", "analyze", "save-key", "delete-key"]) $(id).disabled = value;
-  $("analyze").textContent = value ? "正在处理……" : "用 DeepSeek 理解项目 ↗";
-}
-
-async function task(action) {
-  notice("");
-  setBusy(true);
-  try { await action(); } catch (error) { notice(error.message, true); }
-  finally { setBusy(false); $("progress").textContent = "就绪"; }
-}
-
 function keyState(configured, saved) {
-  $("key-state").textContent = configured ? (saved ? "已安全保存" : "本次已设置") : "未配置";
+  $('key-state').textContent = configured ? (saved ? '已安全保存' : '本次已设置') : '未配置';
+  $('key-dot').textContent = configured ? '●' : '○';
 }
-
-function setRepository(value) {
-  repository = value;
-  selected = null;
-  sourceRequest++;
-  $("consent").checked = false;
-  $("source").replaceChildren();
-  $("source-title").textContent = "源码核对";
-  $("source-anchor").textContent = "点击文件或图节点，打开只读源码";
-  $("node-summary").textContent = "文件与行号来自当前本地索引。";
-  $("file-list").replaceChildren();
-  $("file-count").textContent = value ? value.files.length : 0;
-  if (!value) return;
-  $("project-name").textContent = value.name;
-  $("repo-path").value = value.path;
-  for (const file of value.files) {
-    const button = document.createElement("button");
-    button.className = "file-item";
-    button.textContent = "◇  " + file.path;
-    button.title = file.path;
-    button.dataset.id = file.id;
-    button.addEventListener("click", () => openSource(file.id));
-    $("file-list").append(button);
-  }
-}
-
-function svg(name, attributes = {}, text = null) {
-  const element = document.createElementNS(SVG_NS, name);
-  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
-  if (text !== null) element.textContent = text;
-  return element;
-}
-
-// Stable Kahn layering. Cyclic leftovers share a final layer; no model coordinates.
-function layout(nodes, edges) {
-  const degrees = new Map(nodes.map((node) => [node.id, 0]));
-  const outgoing = new Map(nodes.map((node) => [node.id, []]));
-  const levels = new Map(nodes.map((node) => [node.id, 0]));
-  for (const edge of edges) {
-    degrees.set(edge.target, degrees.get(edge.target) + 1);
-    outgoing.get(edge.source).push(edge.target);
-  }
-  const queue = nodes.filter((node) => degrees.get(node.id) === 0).map((node) => node.id).sort();
-  const processed = new Set();
-  for (let index = 0; index < queue.length; index++) {
-    const id = queue[index];
-    processed.add(id);
-    for (const target of outgoing.get(id)) {
-      levels.set(target, Math.max(levels.get(target), levels.get(id) + 1));
-      degrees.set(target, degrees.get(target) - 1);
-      if (degrees.get(target) === 0) queue.push(target);
-    }
-  }
-  const last = Math.max(0, ...[...processed].map((id) => levels.get(id))) + (processed.size ? 1 : 0);
-  for (const node of nodes) if (!processed.has(node.id)) levels.set(node.id, last);
-  const columns = new Map();
-  for (const node of nodes) {
-    const level = levels.get(node.id);
-    if (!columns.has(level)) columns.set(level, []);
-    columns.get(level).push(node);
-  }
-  const positions = new Map();
-  let rows = 1;
-  for (const [level, items] of columns) {
-    items.sort((left, right) => left.group.localeCompare(right.group) || left.path.localeCompare(right.path));
-    rows = Math.max(rows, items.length);
-    items.forEach((node, index) => positions.set(node.id, { x: 35 + level * 265, y: 48 + index * 112 }));
-  }
-  return { positions, width: Math.max(340, columns.size * 265 + 55), height: Math.max(340, rows * 112 + 75) };
-}
-
-function resizeGraph() {
-  $("graph").setAttribute("width", dimensions.width * zoom);
-  $("graph").setAttribute("height", dimensions.height * zoom);
-}
-
-function fit() {
-  zoom = Math.min(1.1, Math.max(.35, ($("graph-scroll").clientWidth - 15) / dimensions.width));
-  resizeGraph();
-}
-
-function renderGraph(value) {
-  graph = value;
-  $("graph").replaceChildren();
-  $("graph-empty").hidden = Boolean(value);
-  if (!value) return;
-  const { positions, width, height } = layout(value.nodes, value.edges);
-  dimensions = { width, height };
-  $("graph").setAttribute("viewBox", `0 0 ${width} ${height}`);
-  const defs = svg("defs");
-  const marker = svg("marker", { id: "arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse" });
-  marker.append(svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#acbec3" }));
-  defs.append(marker); $("graph").append(defs);
-  for (const edge of value.edges) {
-    const from = positions.get(edge.source), to = positions.get(edge.target);
-    const x1 = from.x + 205, y1 = from.y + 39, x2 = to.x, y2 = to.y + 39;
-    const bend = Math.max(35, Math.abs(x2 - x1) / 2);
-    const path = svg("path", { d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`, class: "edge", "marker-end": "url(#arrow)", opacity: Math.max(.25, edge.confidence) });
-    path.append(svg("title", {}, `import · 置信度 ${Math.round(edge.confidence * 100)}%`));
-    $("graph").append(path);
-  }
-  for (const node of value.nodes) {
-    const position = positions.get(node.id);
-    const group = svg("g", { transform: `translate(${position.x},${position.y})`, class: "graph-node", "data-id": node.id, role: "button", tabindex: "0", "aria-label": `查看 ${node.path} 源码` });
-    group.append(svg("rect", { width: 205, height: 78, rx: 8 }));
-    group.append(svg("text", { x: 13, y: 20, class: "node-group" }, node.group.slice(0, 24)));
-    group.append(svg("text", { x: 13, y: 40, class: "node-name" }, (node.entry ? "↗ " : "◇ ") + node.name.slice(0, 22)));
-    group.append(svg("text", { x: 13, y: 61, class: "node-description" }, node.summary.slice(0, 18) + (node.summary.length > 18 ? "…" : "")));
-    group.append(svg("title", {}, `${node.path}\n${node.summary}\nL${node.start_line}–${node.end_line}`));
-    group.addEventListener("click", () => openSource(node.id));
-    group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSource(node.id); } });
-    $("graph").append(group);
-  }
-  $("graph-stats").textContent = `${value.nodes.length} 个文件 · ${value.edges.length} 条依赖${value.incomplete ? " · 范围未完整覆盖" : ""}`;
-  $("mode").textContent = value.mode === "deepseek" ? "DeepSeek 分析" : "本地依赖预览 · 未调用模型";
-  $("project-type").textContent = value.project_type;
-  $("project-summary").textContent = value.summary;
-  $("usage").textContent = value.usage ? `${value.usage.requests} 次请求 · ${value.usage.estimated ? "保守估算 " : ""}${value.usage.total_tokens.toLocaleString()} token` : "";
-  if (value.warnings.length) notice(value.warnings.join("；"));
-  fit();
-}
-
-async function openSource(id) {
-  const serial = ++sourceRequest;
-  try {
-    const source = await api("/api/source?id=" + encodeURIComponent(id));
-    if (serial !== sourceRequest) return;
-    selected = id;
-    const node = graph?.nodes.find((item) => item.id === id);
-    $("source-title").textContent = source.path;
-    $("source-anchor").textContent = `L${source.start_line}–${source.end_line} · 只读 · 当前索引已核对`;
-    $("node-summary").textContent = node?.summary || "当前文件未包含在模型生成的图中。";
-    const fragment = document.createDocumentFragment();
-    const lines = source.content.split(/\r\n|\n|\r/);
-    if (lines.length > 1 && lines.at(-1) === "") lines.pop();
-    lines.forEach((line, index) => {
-      const row = document.createElement("div"); row.className = "code-line";
-      const number = document.createElement("span"); number.className = "line-number"; number.textContent = index + 1;
-      const text = document.createElement("span"); text.className = "code-text"; text.textContent = line || " ";
-      row.append(number, text); fragment.append(row);
-    });
-    $("source").replaceChildren(fragment);
-    $("source").scrollTop = 0;
-    for (const item of document.querySelectorAll(".graph-node,.file-item")) item.classList.toggle("selected", item.dataset.id === selected);
-  } catch (error) { if (serial === sourceRequest) notice(error.message, true); }
-}
-
-$("import").addEventListener("click", () => task(async () => {
-  const result = await api("/api/repository", { path: $("repo-path").value });
-  setRepository(result.repository); renderGraph(result.graph);
-}));
-$("example").addEventListener("click", () => task(async () => {
-  const result = await api("/api/example", {});
-  setRepository(result.repository); renderGraph(result.graph);
-}));
-$("save-key").addEventListener("click", () => task(async () => {
-  const result = await api("/api/key", { api_key: $("api-key").value, remember: $("remember").checked });
-  $("api-key").value = "";
-  keyState(result.key_configured, result.key_saved);
-  notice(result.key_saved ? "Key 已保存到 Windows 凭据管理器。" : "Key 仅在本次服务内存中使用，关闭后清除。");
-}));
-$("delete-key").addEventListener("click", () => task(async () => {
-  await api("/api/key/delete", {}); $("api-key").value = ""; keyState(false, false); notice("本次 Key 与已保存凭据均已清除。");
-}));
-$("analyze").addEventListener("click", () => task(async () => {
-  if (!repository) throw new Error("请先导入 Python 仓库。");
-  if (!$("consent").checked) throw new Error("请先勾选同意发送当前索引摘要。");
+async function task(action, message = '正在处理…') {
+  if (busy) return;
+  busy = true; notice(''); $('progress').textContent = message;
+  const controls = ['pick-directory', 'import', 'example', 'refresh', 'analyze', 'save-key', 'delete-key'];
+  for (const id of controls) $(id).disabled = true;
   const timer = setInterval(async () => {
-    try { const state = await api("/api/state"); $("progress").textContent = state.phase; } catch { /* main request reports errors */ }
+    try { const state = await api('/api/state'); if (state.busy) $('progress').textContent = state.phase; } catch { /* The active request reports connection errors. */ }
   }, 1000);
+  try { await action(); }
+  catch (error) { notice(error.message, true); $('settings-feedback').textContent = error.message; }
+  finally { clearInterval(timer); busy = false; for (const id of controls) $(id).disabled = false; $('progress').textContent = '就绪'; }
+}
+function part(tag, cls, text) { const el = document.createElement(tag); el.className = cls; if (text !== undefined) el.textContent = text; return el; }
+function row(tag, label, icon, classes = '') {
+  const el = part(tag, 'tree-row ' + classes);
+  el.append(part('span', 'chevron', tag === 'summary' ? '›' : ''), part('span', 'tree-icon', icon), part('span', 'tree-label', label));
+  return el;
+}
+function remember(details, key) {
+  details.open = expanded.has(key) || Boolean($('file-filter').value.trim());
+  details.addEventListener('toggle', () => { if (details.open) expanded.add(key); else expanded.delete(key); });
+}
+function renderTree() {
+  $('file-list').replaceChildren();
+  if (!repository) return;
+  const needle = $('file-filter').value.trim().toLocaleLowerCase();
+  const root = { folders: new Map(), files: [] };
+  for (const file of repository.files) {
+    if (needle && !file.path.toLocaleLowerCase().includes(needle) && !file.symbols.some(s => s.qualified_name.toLocaleLowerCase().includes(needle))) continue;
+    const parts = file.path.split('/'); let branch = root;
+    for (const name of parts.slice(0, -1)) { if (!branch.folders.has(name)) branch.folders.set(name, { folders: new Map(), files: [] }); branch = branch.folders.get(name); }
+    branch.files.push(file);
+  }
+  const append = (branch, parent, prefix = '') => {
+    for (const [name, folder] of [...branch.folders].sort(([a], [b]) => a.localeCompare(b))) {
+      const details = document.createElement('details'), key = prefix + name + '/';
+      details.dataset.folder = key; details.append(row('summary', name, '▱'));
+      const children = part('div', 'tree-children'); append(folder, children, key); details.append(children); remember(details, key); parent.append(details);
+    }
+    for (const file of branch.files.sort((a, b) => a.path.localeCompare(b.path))) {
+      const name = file.path.split('/').at(-1), hasSymbols = file.symbols.length > 0;
+      const fileRow = row(hasSymbols ? 'summary' : 'button', name, name.endsWith('.py') ? 'py' : '≡', 'file-item');
+      fileRow.dataset.id = file.id; fileRow.title = file.path + (file.analyzed ? '' : ' · 仅可浏览');
+      fileRow.querySelector('.tree-icon').classList.toggle('python-icon', name.endsWith('.py'));
+      fileRow.addEventListener('click', () => openSource(file.id));
+      if (hasSymbols) {
+        const details = document.createElement('details'); details.dataset.file = file.id; details.append(fileRow);
+        const symbols = part('div', 'tree-children');
+        for (const symbol of file.symbols) {
+          const symbolRow = row('button', symbol.qualified_name, symbol.kind === 'class' ? 'C' : 'ƒ', 'symbol-item');
+          symbolRow.dataset.id = symbol.id; symbolRow.querySelector('.tree-icon').classList.add('symbol-icon');
+          symbolRow.append(part('span', 'tree-line', 'L' + symbol.start_line));
+          symbolRow.addEventListener('click', () => openSource(symbol.id)); symbols.append(symbolRow);
+        }
+        details.append(symbols); remember(details, file.id); parent.append(details);
+      } else parent.append(fileRow);
+    }
+  };
+  append(root, $('file-list'));
+  if (!root.files.length && !root.folders.size) $('file-list').append(part('p', 'tiny', '没有匹配的文件或符号'));
+  updateSelection();
+}
+function updateSelection() {
+  for (const el of document.querySelectorAll('.tree-row[data-id]')) {
+    el.classList.toggle('selected', el.dataset.id === selection?.anchor || el.dataset.id === selection?.file);
+  }
+  view.select(selection?.file);
+}
+function revealFile() {
+  if (!selection) return;
+  // A filter may hide the selected item; reveal it without losing the source view.
+  if ($('file-filter').value) { $('file-filter').value = ''; renderTree(); }
+  const row = [...document.querySelectorAll('.file-item')].find(el => el.dataset.id === selection.file);
+  if (!row) return;
+  for (let parent = row.parentElement; parent && parent !== $('file-list'); parent = parent.parentElement) if (parent.tagName === 'DETAILS') parent.open = true;
+  row.scrollIntoView({ block: 'nearest' });
+}
+async function openSource(id) {
+  const request = ++sourceRequest;
+  $('source-anchor').textContent = '正在读取源码…';
   try {
-    $("progress").textContent = "正在请求 DeepSeek……";
-    const result = await api("/api/analyze", { goal: $("goal").value, model: $("model").value, confirmed: true });
-    renderGraph(result.graph);
-    if (selected) await openSource(selected);
-  } finally { clearInterval(timer); }
+    const source = await api('/api/source?id=' + encodeURIComponent(id));
+    if (request !== sourceRequest) return;
+    selection = { file: source.id, anchor: source.anchor.id };
+    const node = graph?.nodes.find(n => n.id === source.id);
+    const file = repository?.files.find(f => f.id === source.id);
+    $('source-title').textContent = source.path.split('/').at(-1);
+    $('source-anchor').textContent = source.path + (id !== source.id ? ' › ' + source.anchor.name : '');
+    $('source-position').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} · ${source.end_line} 行`;
+    $('source-language').textContent = (source.path.endsWith('.py') ? 'Python' : '文本') + ' · 只读';
+    $('selection-name').textContent = id !== source.id ? source.anchor.name : source.path.split('/').at(-1);
+    $('selection-location').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} ↗`;
+    $('node-summary').textContent = node?.summary || '当前文件可本地浏览，未纳入这张模块图。';
+    $('symbol-shortcuts').replaceChildren();
+    for (const symbol of file?.symbols || []) {
+      const button = part('button', '', (symbol.kind === 'class' ? 'C ' : 'ƒ ') + symbol.qualified_name);
+      button.title = '定位到第 ' + symbol.start_line + ' 行'; button.addEventListener('click', () => openSource(symbol.id));
+      $('symbol-shortcuts').append(button);
+    }
+    renderSource($('source'), source); updateSelection();
+    if (file) for (const folder of document.querySelectorAll('details[data-folder]')) if (file.path.startsWith(folder.dataset.folder)) folder.open = true;
+  } catch (error) { if (request === sourceRequest) { $('source-anchor').textContent = '源码未能打开'; notice(error.message, true); } }
+}
+function renderGraph(value) {
+  graph = value; view.setGraph(value, repository?.path);
+  $('graph-empty').hidden = Boolean(value);
+  if (!value) return;
+  $('graph-stats').textContent = `${value.nodes.length} 个模块 · ${value.edges.length} 条依赖${value.incomplete ? ' · 部分覆盖' : ''}`;
+  $('mode').textContent = value.mode === 'deepseek' ? 'DeepSeek · 语义分组' : '本地依赖预览';
+  $('project-type').textContent = value.project_type; $('project-summary').textContent = value.summary;
+  $('usage').textContent = value.usage ? `${value.usage.requests} 次请求 · ${value.usage.estimated ? '估算 ' : ''}${value.usage.total_tokens.toLocaleString()} token` : '';
+  if (value.warnings.length) notice(value.warnings.join('；'));
+  updateSelection();
+}
+async function imported(result) {
+  if (result.cancelled) { notice('已取消选择，当前项目保持不变。'); return; }
+  const previous = selection;
+  const sameRepository = repository?.path === result.repository.path;
+  if (!sameRepository) { expanded.clear(); $('file-filter').value = ''; }
+  repository = result.repository; selection = null; sourceRequest++;
+  $('consent').checked = false; $('project-name').textContent = repository.name; $('tree-root').textContent = repository.name;
+  $('file-count').textContent = repository.files.length; $('repo-path').value = repository.path;
+  $('index-status').textContent = `${repository.analyzed_count} 个 Python 文件已索引`;
+  renderTree(); renderGraph(result.graph);
+  const entry = result.graph?.nodes.find(n => n.entry);
+  const fileId = sameRepository && repository.files.some(f => f.id === previous?.file) ? previous.file : (entry?.id || repository.files[0]?.id);
+  if (fileId) await openSource(fileId);
+}
+$('path-toggle').addEventListener('click', () => { $('path-form').hidden = !$('path-form').hidden; $('path-toggle').setAttribute('aria-expanded', !$('path-form').hidden); if (!$('path-form').hidden) $('repo-path').focus(); });
+$('path-form').addEventListener('submit', e => { e.preventDefault(); task(async () => { if (!$('repo-path').value.trim()) throw new Error('请输入项目完整路径。'); await imported(await api('/api/repository', { path: $('repo-path').value.trim() })); }, '正在导入项目…'); });
+$('pick-directory').addEventListener('click', () => task(async () => { notice('已请求 Windows 目录选择器；选择文件夹后将自动导入。'); await imported(await api('/api/repository/pick', {})); if (!graph?.warnings.length && !$('notice').textContent.includes('取消')) notice(''); }, '请在 Windows 目录选择器中选择项目…'));
+$('example').addEventListener('click', () => task(async () => imported(await api('/api/example', {})), '正在打开示例…'));
+$('refresh').addEventListener('click', () => task(async () => { if (!repository) throw new Error('请先打开一个项目。'); await imported(await api('/api/repository', { path: repository.path })); }, '正在重新索引…'));
+$('file-filter').addEventListener('input', renderTree);
+$('reveal-file').addEventListener('click', revealFile);
+$('settings-open').addEventListener('click', () => { $('settings-feedback').textContent = ''; $('settings-dialog').showModal(); });
+$('settings-close').addEventListener('click', () => $('settings-dialog').close());
+$('settings-dialog').addEventListener('close', () => { $('api-key').value = ''; });
+$('save-key').addEventListener('click', () => task(async () => {
+  const input = $('api-key'), key = input.value; input.value = '';
+  const result = await api('/api/key', { api_key: key, remember: $('remember').checked });
+  keyState(result.key_configured, result.key_saved);
+  $('settings-feedback').textContent = result.key_saved ? '已安全保存到 Windows 凭据管理器。' : '仅在本次服务内存中使用，关闭服务后清除。';
 }));
-$("zoom-in").addEventListener("click", () => { zoom = Math.min(2, zoom * 1.2); resizeGraph(); });
-$("zoom-out").addEventListener("click", () => { zoom = Math.max(.25, zoom / 1.2); resizeGraph(); });
-$("zoom-fit").addEventListener("click", fit);
-
-api("/api/state").then((state) => {
-  setRepository(state.repository); renderGraph(state.graph);
-  keyState(state.key_configured, state.key_saved); $("model").value = state.default_model;
+$('delete-key').addEventListener('click', () => task(async () => { await api('/api/key/delete', {}); $('api-key').value = ''; keyState(false, false); $('settings-feedback').textContent = '内存 Key 与已保存凭据已清除。'; }));
+$('analyze').addEventListener('click', () => task(async () => {
+  if (!repository) throw new Error('请先打开 Python 项目。');
+  if (!$('consent').checked) throw new Error('请先勾选同意发送当前索引摘要。');
+  const result = await api('/api/analyze', { goal: $('goal').value, model: $('model').value, confirmed: true });
+  renderGraph(result.graph); if (selection) await openSource(selection.anchor);
+}, '正在请求模型分析…'));
+$('zoom-in').addEventListener('click', () => view.zoom(1.2));
+$('zoom-out').addEventListener('click', () => view.zoom(1 / 1.2));
+$('zoom-fit').addEventListener('click', () => view.fit());
+$('focus-graph').addEventListener('click', () => view.fit());
+$('layout-reset').addEventListener('click', () => view.reset());
+api('/api/state').then(async state => {
+  keyState(state.key_configured, state.key_saved); $('model').value = state.default_model;
+  if (state.repository) await imported(state);
   if (state.key_error) notice(state.key_error, true);
-  if (state.busy) notice("其他页面正在运行任务，请稍候再操作。");
-}).catch((error) => notice(error.message, true));
+  if (state.busy) notice('当前有任务正在运行，请稍候再操作。');
+}).catch(error => notice(error.message, true));

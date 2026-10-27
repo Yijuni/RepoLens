@@ -17,13 +17,15 @@ from repolens.errors import RepoLensError
 from repolens.indexing import scan_repository
 from repolens.llm import DEFAULT_MODEL, DeepSeekClient, validate_key
 from repolens import platform as credentials
+from repolens.platform.dialogs import choose_directory
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 class AppState:
-    def __init__(self, repository: str | Path | None = None, *, client_factory=DeepSeekClient, restore_key=True):
+    def __init__(self, repository: str | Path | None = None, *, client_factory=DeepSeekClient, restore_key=True,
+                 directory_picker=choose_directory):
         self.index = scan_repository(repository) if repository else None
         self.graph = dependency_preview(self.index) if self.index else None
         self.lock = threading.Lock()
@@ -32,6 +34,7 @@ class AppState:
         self.saved = False
         self.key_error = None
         self.client_factory = client_factory
+        self.directory_picker = directory_picker
         if restore_key:
             try:
                 self.api_key = credentials.load_key()
@@ -49,8 +52,11 @@ class AppState:
         if self.index is None:
             return None
         return {"name": self.index.root.name, "path": str(self.index.root),
-                "files": [{"id": file.id, "path": file.path, "symbols": list(file.symbols),
-                           "imports": list(file.imports)} for file in self.index.files.values()],
+                "files": [{"id": file.id, "path": file.path,
+                           "analyzed": file.id in self.index.files,
+                           "symbols": [symbol.summary() for symbol in getattr(file, "definitions", ())],
+                           "line_count": file.line_count} for file in self.index.documents.values()],
+                "analyzed_count": len(self.index.files),
                 "edge_count": len(self.index.edges), "warnings": self.index.warnings,
                 "snapshot": self.index.snapshot}
 
@@ -130,9 +136,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
             return
-        if self.command == "GET" and path in ("/", "/app.js", "/style.css"):
+        if self.command == "GET" and path in ("/", "/app.js", "/graph.mjs", "/source.mjs", "/style.css"):
             name, content_type = {"/": ("index.html", "text/html; charset=utf-8"),
                                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                                  "/graph.mjs": ("graph.mjs", "text/javascript; charset=utf-8"),
+                                  "/source.mjs": ("source.mjs", "text/javascript; charset=utf-8"),
                                   "/style.css": ("style.css", "text/css; charset=utf-8")}[path]
             self._send(200, (WEB_ROOT / name).read_bytes(), content_type, cookie=path == "/")
             return
@@ -167,10 +175,16 @@ class Handler(BaseHTTPRequestHandler):
                 credentials.delete_key()
                 state.api_key, state.saved, state.key_error = None, False, None
                 self._json(200, {"key_configured": False, "key_saved": False})
-            elif path in ("/api/repository", "/api/example"):
+            elif path in ("/api/repository", "/api/example", "/api/repository/pick"):
                 state.phase = "正在建立 Python 索引……"
                 if path == "/api/example":
                     root = PROJECT_ROOT / "samples" / "mini_project"
+                elif path == "/api/repository/pick":
+                    state.phase = "请在 Windows 目录选择器中选择项目……"
+                    root = state.directory_picker()
+                    if root is None:
+                        self._json(200, {"cancelled": True})
+                        return
                 else:
                     root = body.get("path")
                     if not isinstance(root, str) or not root.strip():

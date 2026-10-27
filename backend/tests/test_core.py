@@ -103,6 +103,22 @@ class IndexTests(RepositoryCase):
         (self.root / "dangerous.py").write_text("raise RuntimeError('must never execute')", encoding="utf-8")
         self.assertEqual(len(scan_repository(self.root).files), 3)
 
+    def test_symbols_have_real_ranges_and_documents_are_browsable(self):
+        (self.root / "README.md").write_text("# local\n\n说明\n", encoding="utf-8")
+        (self.root / "service.py").write_text(
+            "class Service:\n    def run(self):\n        return 42\n\n\ndef helper():\n    return 1\n", encoding="utf-8"
+        )
+        index = scan_repository(self.root)
+        service = next(file for file in index.files.values() if file.path == "service.py")
+        names = {symbol.qualified_name: symbol for symbol in service.definitions}
+        self.assertEqual((names["Service"].start_line, names["Service"].end_line), (1, 3))
+        self.assertEqual((names["Service.run"].start_line, names["Service.run"].end_line), (2, 3))
+        self.assertEqual((names["helper"].start_line, names["helper"].end_line), (6, 7))
+        source = index.source(names["Service.run"].id)
+        self.assertEqual(source["anchor"]["start_line"], 2)
+        readme = next(document for document in index.documents.values() if document.path == "README.md")
+        self.assertEqual(index.source(readme.id)["content"], "# local\r\n\r\n说明\r\n")
+
 
 class ContractTests(RepositoryCase):
     def test_real_anchors_are_added_locally(self):
@@ -275,6 +291,13 @@ class ServerTests(RepositoryCase):
         with self.assertRaises(error.HTTPError):
             self.call("/api/repository", {"path": str(self.root / "missing")})
         self.assertIs(self.state.graph, old)
+
+    def test_directory_picker_import_and_cancel(self):
+        self.state.directory_picker = lambda: str(self.root)
+        result = self.call("/api/repository/pick", {})
+        self.assertEqual(result["repository"]["path"], str(self.root.resolve()))
+        self.state.directory_picker = lambda: None
+        self.assertEqual(self.call("/api/repository/pick", {}), {"cancelled": True})
 
 
 @unittest.skipUnless(os.name == "nt", "Windows credential API")

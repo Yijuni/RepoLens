@@ -14,6 +14,11 @@ from repolens.errors import RepoLensError
 MAX_FILES = 40
 MAX_FILE_BYTES = 100_000
 MAX_TOTAL_BYTES = 1_000_000
+MAX_BROWSE_FILES = 400
+MAX_BROWSE_BYTES = 4_000_000
+BROWSE_SUFFIXES = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg",
+                   ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".sql", ".rs", ".go", ".java",
+                   ".c", ".h", ".cpp", ".hpp"}
 SKIP_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
     "dist", "build", "target", ".idea", ".vs", ".repolens",
@@ -40,6 +45,27 @@ def _linked(path: Path) -> bool:
 
 
 @dataclass(frozen=True)
+class Symbol:
+    id: str
+    name: str
+    qualified_name: str
+    kind: str
+    start_line: int
+    end_line: int
+
+    def summary(self) -> dict:
+        return vars(self).copy()
+
+
+@dataclass(frozen=True)
+class TextFile:
+    id: str
+    path: str
+    fingerprint: str
+    line_count: int
+
+
+@dataclass(frozen=True)
 class SourceFile:
     id: str
     path: str
@@ -49,6 +75,7 @@ class SourceFile:
     imports: tuple[str, ...]
     targets: tuple[str, ...]
     entry: bool
+    definitions: tuple[Symbol, ...] = ()
 
     def evidence(self) -> dict:
         return {
@@ -64,6 +91,7 @@ class RepositoryIndex:
     edges: set[tuple[str, str]]
     warnings: list[str]
     snapshot: str
+    documents: dict[str, TextFile | SourceFile]
 
     def model_map(self) -> dict:
         return {
@@ -77,7 +105,14 @@ class RepositoryIndex:
         }
 
     def source(self, file_id: str) -> dict:
-        file = self.files.get(file_id)
+        file = self.documents.get(file_id)
+        anchor = None
+        if file is None:
+            for candidate_file in self.files.values():
+                anchor = next((symbol for symbol in candidate_file.definitions if symbol.id == file_id), None)
+                if anchor:
+                    file = candidate_file
+                    break
         if file is None:
             raise RepoLensError("该文件不在当前索引中。", 404)
         candidate = self.root / file.path
@@ -92,7 +127,11 @@ class RepositoryIndex:
         if hashlib.sha256(raw).hexdigest() != file.fingerprint:
             raise RepoLensError("源码自索引后已改变，请重新导入，避免引用旧行号。", 409)
         return {"id": file.id, "path": file.path, "start_line": 1,
-                "end_line": file.line_count, "content": _decode(raw)}
+                "end_line": file.line_count, "content": _decode(raw),
+                "anchor": {"id": anchor.id if anchor else file.id,
+                           "start_line": anchor.start_line if anchor else 1,
+                           "end_line": anchor.end_line if anchor else file.line_count,
+                           "name": anchor.qualified_name if anchor else file.path}}
 
     def assert_current(self) -> None:
         for file_id in self.files:
@@ -107,8 +146,10 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
     if not root.is_dir():
         raise RepoLensError("请选择仓库目录，而不是文件。")
     files: dict[str, SourceFile] = {}
+    documents: dict[str, TextFile | SourceFile] = {}
     warnings: list[str] = []
     total_bytes = 0
+    browse_bytes = 0
     directory_count = 0
     stopped = False
 
@@ -132,10 +173,13 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 warnings.append("已跳过不可访问或越界的目录。")
         children[:] = safe_children
         for name in sorted(names):
-            if not name.endswith(".py") or name.startswith(".") or name.lower() in SKIP_FILES:
+            suffix = Path(name).suffix.lower()
+            if suffix not in BROWSE_SUFFIXES or name.startswith(".") or name.lower() in SKIP_FILES or any(
+                word in name.lower() for word in ("secret", "credential", ".env", "private_key")
+            ):
                 continue
-            if len(files) >= MAX_FILES:
-                warnings.append(f"试用版最多索引 {MAX_FILES} 个 Python 文件，当前结果不完整。")
+            if len(documents) >= MAX_BROWSE_FILES:
+                warnings.append(f"文件浏览达到 {MAX_BROWSE_FILES} 个文件的上限，目录树不完整。")
                 stopped = True
                 break
             candidate = folder / name
@@ -145,17 +189,31 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 if _linked(candidate):
                     continue
                 size = candidate.stat().st_size
-                if size > MAX_FILE_BYTES or total_bytes + size > MAX_TOTAL_BYTES:
+                if size > MAX_FILE_BYTES or browse_bytes + size > MAX_BROWSE_BYTES:
                     warnings.append(f"已跳过较大文件：{relative}")
                     continue
                 raw = _read_bounded(candidate)
-                if len(raw) > MAX_FILE_BYTES or total_bytes + len(raw) > MAX_TOTAL_BYTES:
+                if browse_bytes + len(raw) > MAX_BROWSE_BYTES:
                     warnings.append(f"已跳过较大文件：{relative}")
                     continue
-                text = _decode(raw)
-                tree = ast.parse(text, filename=relative)
+                text = _decode(raw) if suffix == ".py" else raw.decode("utf-8-sig")
+                if "\0" in text:
+                    raise ValueError("binary file")
             except (OSError, UnicodeError, SyntaxError, ValueError, RuntimeError):
                 warnings.append(f"无法解析，已跳过：{relative}")
+                continue
+            browse_bytes += len(raw)
+            file_id = "file_" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+            documents[file_id] = TextFile(file_id, relative, hashlib.sha256(raw).hexdigest(), max(1, len(text.splitlines())))
+            if suffix != ".py":
+                continue
+            if len(files) >= MAX_FILES or total_bytes + len(raw) > MAX_TOTAL_BYTES:
+                warnings.append(f"分析最多 {MAX_FILES} 个 Python 文件、累计 1 MB；部分文件仅可浏览。")
+                continue
+            try:
+                tree = ast.parse(text, filename=relative)
+            except (SyntaxError, ValueError, RecursionError):
+                warnings.append(f"无法解析，仅可浏览：{relative}")
                 continue
             total_bytes += len(raw)
             imports: set[str] = set()
@@ -185,7 +243,23 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 item.name for item in tree.body
                 if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
             )
-            file_id = "file_" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+            definitions = []
+
+            def add_definition(item, prefix=""):
+                qualified = prefix + item.name
+                symbol_id = "symbol_" + hashlib.sha256((relative + ":" + qualified).encode("utf-8")).hexdigest()[:16]
+                definitions.append(Symbol(symbol_id, item.name, qualified,
+                                          "class" if isinstance(item, ast.ClassDef) else "function",
+                                          min([item.lineno] + [decorator.lineno for decorator in item.decorator_list]),
+                                          item.end_lineno or item.lineno))
+                if isinstance(item, ast.ClassDef):
+                    for member in item.body:
+                        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            add_definition(member, qualified + ".")
+
+            for item in tree.body:
+                if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    add_definition(item)
             files[file_id] = SourceFile(
                 file_id, relative, hashlib.sha256(raw).hexdigest(),
                 max(1, len(text.splitlines())), symbols, tuple(sorted(imports)),
@@ -193,8 +267,9 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 name in {"main.py", "__main__.py", "app.py"} or any(
                     isinstance(item, ast.Constant) and item.value == "__main__"
                     for item in ast.walk(tree)
-                ),
+                ), tuple(definitions),
             )
+            documents[file_id] = files[file_id]
         if stopped:
             break
     if not files:
@@ -211,6 +286,6 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
             target_id = aliases.get(target)
             if target_id and target_id != file.id:
                 edges.add((file.id, target_id))
-    snapshot_text = "|".join(f"{file.id}:{file.fingerprint}" for file in files.values())
+    snapshot_text = "|".join(f"{file.id}:{file.fingerprint}" for file in documents.values())
     return RepositoryIndex(root, files, edges, list(dict.fromkeys(warnings)),
-                           hashlib.sha256(snapshot_text.encode()).hexdigest())
+                           hashlib.sha256(snapshot_text.encode()).hexdigest(), documents)
