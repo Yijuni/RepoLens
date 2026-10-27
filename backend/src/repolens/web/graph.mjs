@@ -114,7 +114,7 @@ export class GraphView {
       element.append(svg("text", { x: 13, y: 23, class: "node-name" }, `${node.entry ? "↗" : "◇"}  ${node.name.slice(0, 24)}`));
       element.append(svg("text", { x: 13, y: 42, class: "node-description" }, node.summary.slice(0, 23) + (node.summary.length > 23 ? "…" : "")));
       element.append(svg("line", { x1: 0, y1: 53, x2: W, y2: 53, class: "node-divider" }));
-      element.append(svg("text", { x: 13, y: 70, class: "node-type" }, node.entry ? "ENTRY POINT" : "PYTHON MODULE"));
+      element.append(svg("text", { x: 13, y: 70, class: "node-type" }, node.entry ? "ENTRY POINT" : (node.kind || "MODULE").toUpperCase()));
       element.append(svg("title", {}, `${node.path}\n${node.summary}\nL${node.start_line}–${node.end_line}`));
       element.addEventListener("keydown", e => { if (["Enter", " "].includes(e.key)) { e.preventDefault(); this.onSelect(node.id); } });
       // A click triggered by assistive technology has no pointer sequence.

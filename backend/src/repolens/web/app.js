@@ -11,13 +11,13 @@ const view = new GraphView($('graph'), id => openSource(id));
 async function api(path, body) {
   let response;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), path === '/api/analyze' ? analysisTimeoutMs : 20000);
+  const timeout = setTimeout(() => controller.abort(), path === '/api/analyze' || path === '/api/agent/analyze' ? analysisTimeoutMs : 20000);
   try {
     response = await fetch(path, body === undefined ? {} : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal,
     });
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error(path === '/api/analyze' ? `模型请求超过 ${Math.round(analysisTimeoutMs / 1000)} 秒，已停止等待；请检查模型名、网络和余额后重试。` : '本地操作超时，请关闭选择器后重试。');
+    if (error.name === 'AbortError') throw new Error(path === '/api/analyze' || path === '/api/agent/analyze' ? `模型请求超过 ${Math.round(analysisTimeoutMs / 1000)} 秒，已停止等待；请检查模型名、网络和余额后重试。` : '本地操作超时，请关闭选择器后重试。');
     throw new Error('无法连接本地服务，请检查服务是否仍在运行。');
   } finally { clearTimeout(timeout); }
   const value = await response.json();
@@ -34,7 +34,7 @@ function keyState(configured, saved) {
 async function task(action, message = '正在处理…') {
   if (busy) return;
   busy = true; notice(''); $('progress').textContent = message;
-  const controls = ['pick-directory', 'folder-input', 'import', 'example', 'refresh', 'analyze', 'save-key', 'delete-key'];
+  const controls = ['pick-directory', 'folder-input', 'import', 'example', 'refresh', 'analyze', 'save-architecture', 'save-key', 'delete-key'];
   for (const id of controls) $(id).disabled = true;
   const timer = setInterval(async () => {
     try { const state = await api('/api/state'); if (state.busy) $('progress').textContent = state.phase; } catch { /* The active request reports connection errors. */ }
@@ -97,7 +97,7 @@ function updateSelection() {
   for (const el of document.querySelectorAll('.tree-row[data-id]')) {
     el.classList.toggle('selected', el.dataset.id === selection?.anchor || el.dataset.id === selection?.file);
   }
-  view.select(selection?.file);
+  view.select(selection?.node || selection?.file);
 }
 function revealFile() {
   if (!selection) return;
@@ -112,16 +112,17 @@ async function openSource(id) {
   const request = ++sourceRequest;
   $('source-anchor').textContent = '正在读取源码…';
   try {
-    const source = await api('/api/source?id=' + encodeURIComponent(id));
+    const node = graph?.nodes.find(n => n.id === id);
+    const sourceId = node?.anchor_id || id;
+    const source = await api('/api/source?id=' + encodeURIComponent(sourceId));
     if (request !== sourceRequest) return;
-    selection = { file: source.id, anchor: source.anchor.id };
-    const node = graph?.nodes.find(n => n.id === source.id);
+    selection = { file: source.id, anchor: source.anchor.id, node: node?.id };
     const file = repository?.files.find(f => f.id === source.id);
     $('source-title').textContent = source.path.split('/').at(-1);
-    $('source-anchor').textContent = source.path + (id !== source.id ? ' › ' + source.anchor.name : '');
+    $('source-anchor').textContent = source.path + (sourceId !== source.id ? ' › ' + source.anchor.name : '');
     $('source-position').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} · ${source.end_line} 行`;
     $('source-language').textContent = (source.language || '文本') + ' · 只读';
-    $('selection-name').textContent = id !== source.id ? source.anchor.name : source.path.split('/').at(-1);
+    $('selection-name').textContent = node?.name || (sourceId !== source.id ? source.anchor.name : source.path.split('/').at(-1));
     $('selection-location').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} ↗`;
     $('node-summary').textContent = node?.summary || '当前文件可本地浏览，未纳入这张模块图。';
     $('symbol-shortcuts').replaceChildren();
@@ -139,10 +140,10 @@ function renderGraph(value) {
   $('graph-empty').hidden = Boolean(value);
   if (!value) return;
   $('graph-stats').textContent = `${value.nodes.length} 个模块 · ${value.edges.length} 条依赖${value.incomplete ? ' · 部分覆盖' : ''}`;
-  $('mode').textContent = value.mode === 'deepseek' ? 'DeepSeek · 语义分组' : '本地依赖预览';
+  $('mode').textContent = value.mode === 'deepseek-agent' ? 'DeepSeek · Agent 语义图' : (value.mode === 'saved-agent' ? '已保存 · 语义图' : (value.mode === 'deepseek' ? 'DeepSeek · 语义分组' : '本地依赖预览'));
   $('project-type').textContent = value.project_type; $('project-summary').textContent = value.summary;
-  $('usage').textContent = value.usage ? `${value.usage.requests} 次请求 · ${value.usage.estimated ? '估算 ' : ''}${value.usage.total_tokens.toLocaleString()} token` : '';
-  if (value.warnings.length) notice(value.warnings.join('；'));
+  $('usage').textContent = value.usage ? `${value.usage.requests} 次请求${value.usage.tool_calls === undefined ? '' : ` · ${value.usage.tool_calls} 次工具`} · ${value.usage.estimated ? '估算 ' : ''}${value.usage.total_tokens.toLocaleString()} token` : '';
+  if (value.warnings?.length) notice(value.warnings.join('；'));
   updateSelection();
 }
 async function imported(result) {
@@ -152,11 +153,13 @@ async function imported(result) {
   if (!sameRepository) { expanded.clear(); $('file-filter').value = ''; }
   repository = result.repository; selection = null; sourceRequest++;
   $('consent').checked = false; $('project-name').textContent = repository.name; $('tree-root').textContent = repository.name;
+  $('save-architecture').disabled = !repository.architecture?.can_save || !result.graph || !['deepseek-agent', 'saved-agent'].includes(result.graph.mode);
+  if (repository.architecture?.error && !repository.architecture.loaded) notice('未恢复已保存架构图：' + repository.architecture.error);
   $('file-count').textContent = repository.files.length; $('repo-path').value = repository.path;
   $('index-status').textContent = `${repository.analyzed_count} 个源文件已索引`;
   renderTree(); renderGraph(result.graph);
   const entry = result.graph?.nodes.find(n => n.entry);
-  const fileId = sameRepository && repository.files.some(f => f.id === previous?.file) ? previous.file : (entry?.id || repository.files[0]?.id);
+  const fileId = sameRepository && repository.files.some(f => f.id === previous?.file) ? previous.file : (entry?.anchor_id || entry?.id || repository.files[0]?.id);
   if (fileId) await openSource(fileId);
 }
 $('path-toggle').addEventListener('click', () => { $('path-form').hidden = !$('path-form').hidden; $('path-toggle').setAttribute('aria-expanded', !$('path-form').hidden); if (!$('path-form').hidden) $('repo-path').focus(); });
@@ -201,9 +204,20 @@ $('delete-key').addEventListener('click', () => task(async () => { await api('/a
 $('analyze').addEventListener('click', () => task(async () => {
   if (!repository) throw new Error('请先打开代码项目。');
   if (!$('consent').checked) throw new Error('请先勾选同意发送当前索引摘要。');
-  const result = await api('/api/analyze', { goal: $('goal').value, model: $('model').value, confirmed: true });
+  if (!window.confirm('确认启动 Agent 分析？模型会按需读取有限代码片段和项目文档，导入项目本身不会触发模型请求。')) return;
+  const result = await api('/api/agent/analyze', { goal: $('goal').value, model: $('model').value, confirmed: true });
+  repository = result.repository || repository;
   renderGraph(result.graph); if (selection) await openSource(selection.anchor);
-}, '正在请求模型分析…'));
+  $('save-architecture').disabled = !repository.architecture?.can_save;
+}, '正在启动 Agent 探索…'));
+$('save-architecture').addEventListener('click', () => task(async () => {
+  if (!repository?.architecture?.can_save) throw new Error('当前是浏览器上传的临时快照，不能持久保存；请使用输入路径导入项目。');
+  if (!graph || !['deepseek-agent', 'saved-agent'].includes(graph.mode)) throw new Error('请先生成通过校验的语义架构图。');
+  if (!window.confirm('确认将当前语义架构图保存到项目的 .repolens/architecture.json？')) return;
+  const result = await api('/api/architecture/save', { confirmed: true, model: $('model').value, goal: $('goal').value });
+  repository = result.repository || repository; renderGraph(result.graph); $('save-architecture').disabled = false;
+  notice('架构图已保存到项目 .repolens/architecture.json。');
+}, '正在保存架构图…'));
 $('zoom-in').addEventListener('click', () => view.zoom(1.2));
 $('zoom-out').addEventListener('click', () => view.zoom(1 / 1.2));
 $('zoom-fit').addEventListener('click', () => view.fit());

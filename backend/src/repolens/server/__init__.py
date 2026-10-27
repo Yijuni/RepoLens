@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
 from repolens.analysis import analyze
+from repolens.agent import explore
 from repolens.config import get_config
 from repolens.contracts import dependency_preview
 from repolens.diagnostics import configure_logging, error_text, get_logger
@@ -28,6 +29,7 @@ from repolens.indexing import (
     scan_repository,
 )
 from repolens.llm import DEFAULT_MODEL, DeepSeekClient, validate_key
+from repolens.persistence import load_graph, save_graph
 from repolens import platform as credentials
 from repolens.platform.dialogs import choose_directory
 
@@ -42,8 +44,11 @@ class AppState:
                  directory_picker=choose_directory):
         LOGGER.info("state.init repository=%s", Path(repository).name if repository else "none")
         self.index = scan_repository(repository) if repository else None
-        self.graph = dependency_preview(self.index) if self.index else None
+        self.graph = None
         self.repository_label = None
+        self.persistence_enabled = bool(repository)
+        self.architecture_error = None
+        self.architecture_path = None
         self.upload_root = PROJECT_ROOT / ".repolens" / "uploads"
         self.upload_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
@@ -58,6 +63,8 @@ class AppState:
         self.key_error = None
         self.client_factory = client_factory
         self.directory_picker = directory_picker
+        if self.index:
+            self._set_index(self.index, persistent=self.persistence_enabled)
         if restore_key:
             try:
                 self.api_key = credentials.load_key()
@@ -76,9 +83,29 @@ class AppState:
                             "analysis_file_bytes": config.limits.analysis_file_bytes,
                             "analysis_bytes": MAX_TOTAL_BYTES},
                 "agent": {"max_rounds": config.agent.max_rounds,
-                          "request_timeout_seconds": config.agent.request_timeout_seconds},
+                          "max_tool_calls": config.agent.max_tool_calls,
+                          "max_read_lines": config.agent.max_read_lines,
+                          "token_budget": config.agent.token_budget,
+                          "request_timeout_seconds": config.agent.request_timeout_seconds,
+                          "wall_time_seconds": config.agent.wall_time_seconds},
                 "busy": self.lock.locked() or self.picker_pending(), "phase": self.phase,
                 "repository": self.repository_summary(), "graph": self.graph}
+
+    def _set_index(self, index, *, persistent: bool) -> None:
+        self.index = index
+        self.persistence_enabled = persistent
+        self.architecture_error = None
+        self.architecture_path = None
+        self.graph = dependency_preview(index)
+        if persistent:
+            loaded, issue = load_graph(index)
+            self.architecture_error = issue
+            if loaded:
+                self.graph = loaded
+                self.architecture_path = str(index.root / ".repolens" / "architecture.json")
+                LOGGER.info("architecture.loaded snapshot=%s", index.snapshot[:12])
+            elif issue:
+                LOGGER.info("architecture.unavailable reason=%s", issue[:160])
 
     def picker_pending(self) -> bool:
         return bool(self.picker_thread and self.picker_thread.is_alive())
@@ -138,7 +165,7 @@ class AppState:
                 return {"pending": False, "cancelled": True}
             if self.picker_result:
                 candidate_index, candidate_graph = self.picker_result
-                self.index, self.graph = candidate_index, candidate_graph
+                self._set_index(candidate_index, persistent=True)
                 self.picker_result = None
                 LOGGER.info("picker.result_delivered")
                 return {"pending": False, "repository": self.repository_summary(), "graph": self.graph}
@@ -155,7 +182,24 @@ class AppState:
                            "line_count": file.line_count} for file in self.index.documents.values()],
                 "analyzed_count": len(self.index.files),
                 "edge_count": len(self.index.edges), "warnings": self.index.warnings,
-                "snapshot": self.index.snapshot}
+                "snapshot": self.index.snapshot,
+                "architecture": {"can_save": self.persistence_enabled,
+                                  "loaded": self.graph.get("mode") == "saved-agent" if self.graph else False,
+                                  "path": self.architecture_path,
+                                  "error": self.architecture_error}}
+
+    def save_architecture(self, *, model: str = "unknown", goal: str = "") -> str:
+        if not self.persistence_enabled or not self.index:
+            raise RepoLensError("浏览器上传的临时快照不能持久保存，请使用输入路径导入项目后再保存。")
+        if not self.graph or self.graph.get("schema_version") != "0.2":
+            raise RepoLensError("请先生成通过校验的语义架构图。")
+        path = save_graph(self.index, self.graph, model=model, goal=goal,
+                          usage=self.graph.get("usage"))
+        self.graph["mode"] = "saved-agent"
+        self.architecture_path = str(path)
+        self.architecture_error = None
+        LOGGER.info("architecture.saved snapshot=%s", self.index.snapshot[:12])
+        return str(path)
 
     def import_uploaded(self, files: list[dict]) -> tuple[object, dict]:
         if not files or len(files) > MAX_BROWSE_FILES:
@@ -206,7 +250,8 @@ class AppState:
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        self.index, self.graph, self.repository_label = candidate_index, candidate_graph, root_name
+        self.repository_label = root_name
+        self._set_index(candidate_index, persistent=False)
         LOGGER.info("repository.upload name=%s files=%d bytes=%d edges=%d", root_name,
                     len(candidate_index.documents), total, len(candidate_index.edges))
         return candidate_index, candidate_graph
@@ -359,8 +404,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(root, str) or not root.strip():
                         raise RepoLensError("请输入本地仓库目录。")
                 candidate_index = scan_repository(root)
-                candidate_graph = dependency_preview(candidate_index)
-                state.index, state.graph = candidate_index, candidate_graph
+                state._set_index(candidate_index, persistent=True)
                 LOGGER.info("repository.import name=%s files=%d edges=%d elapsed_ms=%d",
                             Path(root).name, len(candidate_index.documents), len(candidate_index.edges),
                             int((time.monotonic() - request_started) * 1000))
@@ -372,6 +416,32 @@ class Handler(BaseHTTPRequestHandler):
                 state.phase = "正在读取浏览器选择的项目……"
                 state.import_uploaded(files)
                 self._json(200, {"repository": state.repository_summary(), "graph": state.graph})
+            elif path == "/api/architecture/save":
+                if body.get("confirmed") is not True:
+                    raise RepoLensError("请先确认保存当前已校验的架构图。")
+                saved_path = state.save_architecture(model=body.get("model", DEFAULT_MODEL),
+                                                     goal=body.get("goal", ""))
+                self._json(200, {"saved": True, "path": saved_path,
+                                 "repository": state.repository_summary(), "graph": state.graph})
+            elif path == "/api/agent/analyze":
+                if body.get("confirmed") is not True:
+                    raise RepoLensError("请先确认启动 Agent 读取必要代码片段。")
+                if state.index is None or not state.api_key:
+                    raise RepoLensError("请先导入仓库并配置 DeepSeek API Key。")
+                agent_config = get_config().agent
+                client = state.client_factory(state.api_key, model=body.get("model", DEFAULT_MODEL),
+                                              timeout=agent_config.request_timeout_seconds)
+                model_name = getattr(client, "model", body.get("model", DEFAULT_MODEL))
+                LOGGER.info("agent.start model=%s goal_chars=%d files=%d",
+                            model_name, len(body.get("goal", "")) if isinstance(body.get("goal", ""), str) else -1,
+                            len(state.index.files))
+                graph = explore(state.index, body.get("goal", ""), client,
+                                lambda message: setattr(state, "phase", message), settings=agent_config)
+                state.graph = graph
+                LOGGER.info("agent.complete model=%s requests=%d tools=%d tokens=%d elapsed_ms=%d",
+                            model_name, graph["usage"]["requests"], graph["usage"]["tool_calls"],
+                            graph["usage"]["total_tokens"], int((time.monotonic() - request_started) * 1000))
+                self._json(200, {"graph": graph, "repository": state.repository_summary()})
             elif path == "/api/analyze":
                 if body.get("confirmed") is not True:
                     raise RepoLensError("请先确认将当前索引摘要发送至 DeepSeek。")

@@ -16,6 +16,7 @@ class Completion:
     content: str
     tokens: int
     estimated: bool = False
+    tool_calls: tuple[dict, ...] = ()
 
 
 class _NoRedirect(request.HTTPRedirectHandler):
@@ -40,12 +41,16 @@ class DeepSeekClient:
         self.model = model.strip()
         self.timeout = timeout
 
-    def complete(self, messages: list[dict], max_tokens: int) -> Completion:
-        payload = json.dumps({
+    def complete(self, messages: list[dict], max_tokens: int, tools: list[dict] | None = None) -> Completion:
+        request_payload = {
             "model": self.model, "messages": messages, "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"}, "stream": False,
+            "stream": False,
             "thinking": {"type": "disabled"},
-        }, ensure_ascii=False).encode("utf-8")
+            **({"tools": [{"type": "function", "function": tool} for tool in tools]} if tools else {}),
+        }
+        if not tools:
+            request_payload["response_format"] = {"type": "json_object"}
+        payload = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
         req = request.Request(ENDPOINT, data=payload, method="POST", headers={
             "Authorization": "Bearer " + self._api_key,
             "Content-Type": "application/json", "Accept": "application/json",
@@ -57,17 +62,27 @@ class DeepSeekClient:
                 raise RepoLensError("DeepSeek 返回内容过大，已拒绝读取。", 502)
             result = json.loads(body)
             choice = result["choices"][0]
-            if choice.get("finish_reason") != "stop":
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in {"stop", "tool_calls"}:
                 raise RepoLensError("模型未完整生成结果；请选更小的目录后重试。", 502)
-            content = choice["message"]["content"]
+            message = choice["message"]
+            content = message.get("content") or ""
             if not isinstance(content, str) or not content.strip():
-                raise ValueError("empty content")
+                if finish_reason == "stop":
+                    raise ValueError("empty content")
             tokens = (result.get("usage") or {}).get("total_tokens")
             estimated = type(tokens) is not int or tokens < 0
             if estimated:
                 # UTF-8 byte count is intentionally conservative, not a claimed tokenizer.
                 tokens = len(payload) + len(content.encode("utf-8"))
-            return Completion(content, tokens, estimated)
+            calls = []
+            for call in message.get("tool_calls", ()) or ():
+                function = call.get("function") or {}
+                name = function.get("name")
+                arguments = function.get("arguments", "{}")
+                if isinstance(name, str) and isinstance(arguments, str):
+                    calls.append({"id": call.get("id", ""), "name": name, "arguments": arguments})
+            return Completion(content, tokens, estimated, tuple(calls))
         except error.HTTPError as exc:
             messages_by_status = {
                 401: "DeepSeek 认证失败，请检查 API Key。",

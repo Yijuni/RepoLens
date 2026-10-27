@@ -13,6 +13,7 @@
 - 按真实索引校验模型节点和依赖，拒绝编造的源码引用。
 - 无 Key 也可使用本地依赖预览，内置四文件示例。
 - Key 可仅在内存使用，或保存到 Windows 凭据管理器。
+- 导入项目后不会自动请求模型；用户确认后，Agent 才会按需读取有限代码证据并生成语义架构图。路径导入的项目可手动保存到 `.repolens/architecture.json`，下次导入时按快照校验后恢复。
 
 ## 快速开始
 
@@ -74,6 +75,9 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 | --- | --- |
 | [indexing](backend/src/repolens/indexing/README.md) | Python AST 索引与快照 |
 | [contracts](backend/src/repolens/contracts/README.md) | 图 schema 与证据校验 |
+| [tools](backend/src/repolens/tools/README.md) | 显式只读工具注册表与证据 |
+| [agent](backend/src/repolens/agent/README.md) | 用户确认后执行的 DeepSeek 工具探索 |
+| [persistence](backend/src/repolens/persistence/README.md) | 显式保存与恢复语义架构图 |
 | [analysis](backend/src/repolens/analysis/README.md) | 有预算限制的模型分析 |
 | [llm](backend/src/repolens/llm/README.md) | 当前模型客户端与后续 provider 扩展入口 |
 | [prompts](backend/src/repolens/prompts/README.md) | 版本化模型指令 |
@@ -95,7 +99,9 @@ python -X utf8 -m unittest discover -s backend/tests -v
 
 - 默认最多浏览 5000 个文本文件、总计 64 MB；静态分析默认最多 200 个源码文件、总计 8 MB。上限可在 `config.toml` 调整，超限或解析失败时标记不完整。
 - 多语言静态解析当前覆盖 Python、C/C++、Go、Java、JavaScript/TypeScript 和 Rust；复杂宏、动态导入、生成代码和其他语言先提供只读浏览，关系覆盖会标记不完整。
-- 图是文件级静态 import 关系，不代表运行时调用；不保证复杂包路径与动态导入解析。
-- 模型根据元数据推测职责，尚无主动探索源码的完整 Agent、背包问答或增量索引。
+- 语义 IR v0.2、只读工具注册表和 DeepSeek tool-call Agent 已建立；当前仍在完善多轮探索和关系样式，且不会因导入项目自动调用模型。
+- 当前已提供 DeepSeek tool-call Agent 和语义图保存接口；仍在逐步完善 SSE 进度、取消、更多关系样式和大项目性能。
+- 无 Key 时图是文件级静态依赖关系，不代表运行时调用；复杂包路径与动态导入解析可能不完整。配置 DeepSeek 并确认生成后，图可切换为带证据的语义模块关系。
+- Agent 当前已支持有限只读工具探索和语义图提交，尚未实现完整 SSE 事件流、背包问答或增量索引。
 - 当前通过本地浏览器运行，尚无 Tauri 桌面安装包；代码着色是轻量 Python 词法着色，不替代 Monaco 语言服务。
 - 真实模型可用性和费用取决于账户与所选模型。

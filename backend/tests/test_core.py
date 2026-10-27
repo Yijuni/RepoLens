@@ -14,14 +14,17 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from repolens.analysis import analyze
+from repolens.agent import explore
 from repolens.config import load_config
-from repolens.contracts import dependency_preview, schema_for, validate_graph
+from repolens.contracts import dependency_preview, schema_for, semantic_schema_for, validate_graph, validate_semantic_graph
 from repolens.errors import RepoLensError
 from repolens.indexing import scan_repository
 from repolens.llm import Completion, DeepSeekClient, ENDPOINT
 from repolens import platform as credentials
 from repolens.platform import dialogs
 from repolens.server import AppState, LocalServer
+from repolens.tools import build_default_registry
+from repolens.persistence import architecture_path, load_graph, save_graph
 
 
 class ConfigTests(unittest.TestCase):
@@ -210,6 +213,104 @@ class ContractTests(RepositoryCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["edges"]["items"]["properties"]["type"]["enum"], ["import"])
 
+    def semantic_draft(self):
+        files = list(self.index.files.values())
+        return {
+            "project_type": "Python 服务",
+            "summary": "入口模块调用服务模块。",
+            "modules": [
+                {"module_key": "entry", "label": "请求入口", "kind": "service", "summary": "接收项目入口请求。",
+                 "group": "服务入口", "anchor_ids": [files[0].id], "evidence_refs": ["ev_entry"], "confidence": .9,
+                 "render_spec": {"shape": "service", "accent": "blue", "badge": "API", "lane": "服务入口", "emphasis": "high"}},
+                {"module_key": "service", "label": "业务服务", "kind": "library", "summary": "提供入口依赖的业务函数。",
+                 "group": "运行时核心", "anchor_ids": [files[1].id], "evidence_refs": ["ev_service"], "confidence": .8},
+            ],
+            "relations": [{"source": "entry", "target": "service", "type": "calls", "label": "调用服务",
+                           "confidence": .7, "evidence_refs": ["ev_relation"]}],
+            "incomplete": False, "incomplete_regions": [],
+        }
+
+    def test_semantic_graph_derives_ids_and_real_anchors(self):
+        graph = validate_semantic_graph(self.semantic_draft(), self.index,
+                                        {"ev_entry", "ev_service", "ev_relation"})
+        self.assertEqual(graph["schema_version"], "0.2")
+        self.assertTrue(graph["nodes"][0]["id"].startswith("module_"))
+        self.assertEqual(graph["nodes"][0]["anchors"][0]["path"], "main.py")
+        self.assertEqual(graph["edges"][0]["type"], "calls")
+        self.assertEqual(graph["nodes"][0]["render_spec"]["shape"], "service")
+
+    def test_semantic_graph_rejects_fake_anchor_or_evidence(self):
+        raw = self.semantic_draft()
+        raw["modules"][0]["anchor_ids"] = ["symbol_invented"]
+        with self.assertRaises(RepoLensError):
+            validate_semantic_graph(raw, self.index, {"ev_entry", "ev_service", "ev_relation"})
+        raw = self.semantic_draft()
+        raw["modules"][0]["evidence_refs"] = ["ev_missing"]
+        with self.assertRaises(RepoLensError):
+            validate_semantic_graph(raw, self.index, {"ev_entry", "ev_service", "ev_relation"})
+
+    def test_semantic_schema_is_strict_and_has_relation_types(self):
+        schema = semantic_schema_for()
+        self.assertEqual(schema["required"], ["project_type", "summary", "modules", "relations", "incomplete", "incomplete_regions"])
+        self.assertIn("dispatches", schema["properties"]["relations"]["items"]["properties"]["type"]["enum"])
+
+
+class ToolTests(RepositoryCase):
+    def test_default_registry_returns_bounded_evidence(self):
+        registry = build_default_registry(self.index)
+        self.assertIn("read_symbol", registry.names())
+        listing = registry.invoke("list_files", {"limit": 1})
+        self.assertEqual(listing["evidence"]["snapshot"], self.index.snapshot)
+        self.assertEqual(len(listing["result"]["items"]), 1)
+        symbol = self.index.files[next(iter(self.index.files))].definitions
+        result = registry.invoke("read_symbol", {"symbol_id": symbol[0].id})
+        self.assertEqual(result["result"]["symbol_id"], symbol[0].id)
+        self.assertNotIn(str(self.root), json.dumps(result, ensure_ascii=False))
+
+    def test_tools_reject_unknown_ids_and_oversized_reads(self):
+        registry = build_default_registry(self.index)
+        with self.assertRaises(RepoLensError):
+            registry.invoke("read_range", {"file_id": "file_fake", "start_line": 1, "end_line": 2})
+        file_id = next(iter(self.index.documents))
+        with self.assertRaises(RepoLensError):
+            registry.invoke("read_range", {"file_id": file_id, "start_line": 1, "end_line": 201})
+
+
+class PersistenceTests(RepositoryCase):
+    def _graph(self):
+        registry = build_default_registry(self.index)
+        evidence = registry.invoke("entry_candidates", {})["evidence"]["evidence_id"]
+        file = next(iter(self.index.files.values()))
+        return validate_semantic_graph({
+            "project_type": "Python", "summary": "持久化测试。",
+            "modules": [{"module_key": "entry", "label": "入口", "kind": "module", "summary": "入口模块。", "group": "核心",
+                         "anchor_ids": [file.id], "evidence_refs": [evidence], "confidence": .8}],
+            "relations": [], "incomplete": False, "incomplete_regions": [],
+        }, self.index, {evidence}) | {"usage": {"requests": 1, "tool_calls": 1, "total_tokens": 2}, "mode": "deepseek-agent"}
+
+    def test_explicit_save_and_load_roundtrip(self):
+        graph = self._graph()
+        try:
+            path = save_graph(self.index, graph, model="deepseek-chat", goal="理解入口", usage=graph["usage"])
+            self.assertEqual(path, architecture_path(self.root))
+            loaded, issue = load_graph(self.index)
+            self.assertIsNone(issue)
+            self.assertEqual(loaded["schema_version"], "0.2")
+            self.assertEqual(loaded["mode"], "saved-agent")
+            self.assertNotIn("content", json.dumps(json.loads(path.read_text(encoding="utf-8"))))
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+    def test_stale_saved_graph_is_not_restored(self):
+        graph = self._graph()
+        save_graph(self.index, graph)
+        (self.root / "main.py").write_text("changed = True\n", encoding="utf-8")
+        changed = scan_repository(self.root)
+        loaded, issue = load_graph(changed)
+        self.assertIsNone(loaded)
+        self.assertIn("旧索引", issue)
+        shutil.rmtree(architecture_path(self.root).parent, ignore_errors=True)
+
 
 class StubClient:
     def __init__(self, outputs):
@@ -219,6 +320,54 @@ class StubClient:
     def complete(self, messages, max_tokens):
         self.requests.append(copy.deepcopy(messages))
         return Completion(next(self.outputs), 100)
+
+
+class AgentStubClient:
+    def __init__(self, final_output):
+        self.final_output = final_output
+        self.requests = []
+        self.calls = 0
+
+    def complete(self, messages, max_tokens, tools=None):
+        self.requests.append(copy.deepcopy(messages))
+        self.calls += 1
+        if self.calls == 1:
+            return Completion("", 100, tool_calls=({"id": "call_1", "name": "entry_candidates", "arguments": "{}"},))
+        return Completion(self.final_output, 100)
+
+
+class AgentTests(RepositoryCase):
+    def test_tool_exploration_submits_valid_semantic_graph(self):
+        from repolens.tools import build_default_registry
+        registry = build_default_registry(self.index)
+        evidence = registry.invoke("entry_candidates", {})["evidence"]["evidence_id"]
+        files = list(self.index.files.values())
+        raw = {
+            "project_type": "Python 服务", "summary": "通过入口调用服务。",
+            "modules": [
+                {"module_key": "entry", "label": "入口", "kind": "service", "summary": "服务入口。", "group": "入口",
+                 "anchor_ids": [files[0].id], "evidence_refs": [evidence], "confidence": .8},
+            ],
+            "relations": [], "incomplete": True, "incomplete_regions": ["仅探索入口候选"],
+        }
+        client = AgentStubClient(json.dumps(raw))
+        result = explore(self.index, "理解入口", client, registry=registry)
+        self.assertEqual(result["schema_version"], "0.2")
+        self.assertEqual(result["usage"]["tool_calls"], 1)
+        self.assertEqual(len(client.requests), 2)
+        self.assertTrue(any(item["role"] == "tool" for item in client.requests[-1]))
+
+    def test_agent_rejects_graph_without_obtained_evidence(self):
+        files = list(self.index.files.values())
+        raw = {
+            "project_type": "Python", "summary": "不应通过。",
+            "modules": [{"module_key": "entry", "label": "入口", "kind": "module", "summary": "入口。", "group": "入口",
+                         "anchor_ids": [files[0].id], "evidence_refs": ["ev_not_seen"], "confidence": .5}],
+            "relations": [], "incomplete": False, "incomplete_regions": [],
+        }
+        client = AgentStubClient(json.dumps(raw))
+        with self.assertRaisesRegex(RepoLensError, "未能"):
+            explore(self.index, "理解入口", client)
 
 
 class AnalysisTests(RepositoryCase):
@@ -270,6 +419,20 @@ class ClientTests(unittest.TestCase):
                 DeepSeekClient("synthetic-test-key").complete([], 512)
         self.assertNotIn("synthetic", str(raised.exception))
         self.assertNotIn("private-upstream", str(raised.exception))
+
+    def test_tool_call_response_is_parsed(self):
+        response = {"choices": [{"finish_reason": "tool_calls", "message": {"content": None, "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "list_files", "arguments": "{}"}}
+        ]}}], "usage": {"total_tokens": 87}}
+        opener = unittest.mock.Mock()
+        opener.open.return_value = io.BytesIO(json.dumps(response).encode())
+        with patch("repolens.llm.request.build_opener", return_value=opener):
+            completion = DeepSeekClient("synthetic-test-key").complete([], 512,
+                tools=[{"name": "list_files", "description": "list", "parameters": {"type": "object"}}])
+        self.assertEqual(completion.tool_calls[0]["name"], "list_files")
+        payload = json.loads(opener.open.call_args.args[0].data)
+        self.assertIn("tools", payload)
+        self.assertNotIn("response_format", payload)
 
 
 class ServerTests(RepositoryCase):

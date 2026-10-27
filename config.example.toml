@@ -19,9 +19,12 @@ analysis_file_bytes = 512000
 analysis_bytes = 8000000
 
 [agent]
-# 当前固定地图分析流程最多使用 max_rounds 次模型请求（含修正请求）。
+# Agent 最多使用 max_rounds 次模型请求（含工具探索和修正请求）。
 max_rounds = 2
+max_tool_calls = 40
+max_read_lines = 200
 token_budget = 32000
 max_output_tokens = 4096
 context_chars = 24000
 request_timeout_seconds = 60
+wall_time_seconds = 180
