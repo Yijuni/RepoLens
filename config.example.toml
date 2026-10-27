@@ -1,0 +1,27 @@
+# RepoLens 本地运行配置模板。复制为 config.toml 后按需修改。
+# 不要在此文件或 config.toml 中写 API Key。
+
+[server]
+# 相对路径以仓库根目录为基准；也可以填写 Windows 绝对路径。
+log_dir = "logs"
+port = 0
+open_browser = false
+
+[limits]
+# 目录树和源码浏览范围。
+browse_files = 5000
+browse_file_bytes = 1000000
+browse_bytes = 64000000
+directories = 10000
+# Python AST/模型元数据分析范围；超出部分仍可浏览。
+analysis_files = 200
+analysis_file_bytes = 512000
+analysis_bytes = 8000000
+
+[agent]
+# 当前固定地图分析流程最多使用 max_rounds 次模型请求（含修正请求）。
+max_rounds = 2
+token_budget = 32000
+max_output_tokens = 4096
+context_chars = 24000
+request_timeout_seconds = 60

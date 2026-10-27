@@ -38,6 +38,7 @@ build/
 
 # Local RepoLens data, indexes and logs.
 .repolens/
+/config.toml
 *.sqlite
 *.sqlite3
 *.sqlite-wal

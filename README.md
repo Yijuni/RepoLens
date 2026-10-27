@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 只读索引 Python 文件、顶层类/函数与 import，不执行目标代码。
+- 只读索引 Python、C/C++、Go、Java、JavaScript/TypeScript 和 Rust 等源码，提取可验证的符号与静态依赖线索，不执行目标代码。
 - 自动布局文件依赖图，支持分组折叠、节点拖拽、画布平移/缩放与只读源码查看。
 - 浏览器可通过目录选择器导入文本项目快照；左侧文件树可展开目录、文件、类和函数，点击后定位真实源码行。也可输入本机完整路径直接索引。
 - 当前使用 DeepSeek 生成项目说明、模块摘要和语义分组；模型接入层预留后续扩展其他模型。
@@ -34,6 +34,8 @@ conda activate .\.conda
 python -X utf8 backend/run.py --open
 ```
 
+需要调整日志目录、文件范围或模型预算时，复制 `config.example.toml` 为仓库根目录的 `config.toml` 后编辑；该文件默认被 Git 忽略，不应写入 API Key。也可以用 `--log-dir` 或 `REPOLENS_LOG_DIR` 临时覆盖日志目录。
+
 Windows 64 位可从 conda-win-64.lock.txt 恢复精确版本：
 
 ```powershell
@@ -54,7 +56,7 @@ python -X utf8 backend/run.py --repo 'E:\projects\my-project' --open
 4. 点击“用 DeepSeek 理解项目”，等待通过校验的模块图与说明。
 5. 点击节点核对源码；目标文件修改后须重新导入。
 
-当前接入 DeepSeek，默认模型为 `deepseek-chat`；可在模型设置中填写账户可用的其它模型。每次最多 2 次请求、累计预算 32,000 token，单次超时 60 秒。后续模型接入会复用同一分析流程和图校验机制。
+当前接入 DeepSeek，默认模型为 `deepseek-chat`；可在模型设置中填写账户可用的其它模型。模型请求轮数、token 预算、文件范围和超时可在 `config.toml` 中统一调整，默认最多 2 轮、累计 32,000 token、单次超时 60 秒。后续模型接入会复用同一分析流程和图校验机制。
 
 ## 数据与隐私
 
@@ -64,7 +66,7 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 
 服务只绑定 127.0.0.1，并检查会话与请求来源，不应暴露到公网。
 
-服务器运行日志同时输出到启动终端，并写入 `%LOCALAPPDATA%\\RepoLens\\logs\\server.log`；若该目录不可写，会回退到项目内被忽略的 `.repolens/logs/server.log`。日志经过脱敏，不包含 API Key、源码正文或请求内容。
+服务器运行日志同时输出到启动终端，并默认写入仓库根目录 `logs/server.log`；可在 `config.toml` 的 `server.log_dir`、环境变量 `REPOLENS_LOG_DIR` 或 `--log-dir` 中覆盖。若配置目录不可写，会回退到被忽略的 `.repolens/logs/server.log`。日志经过脱敏，不包含 API Key、源码正文或请求内容。
 
 ## 代码结构
 
@@ -78,6 +80,7 @@ Key 不写入项目文件或日志，不通过状态 API 返回。默认仅驻�
 | [platform](backend/src/repolens/platform/README.md) | Windows 凭据存储 |
 | [server](backend/src/repolens/server/README.md) | 本地 API |
 | [diagnostics](backend/src/repolens/diagnostics/README.md) | 脱敏运行日志 |
+| [config](backend/src/repolens/config/README.md) | 统一运行配置 |
 | [web](backend/src/repolens/web/README.md) | 图与源码工作台 |
 
 ## 测试
@@ -90,7 +93,8 @@ python -X utf8 -m unittest discover -s backend/tests -v
 
 ## 当前限制
 
-- 仅 Python，最多 40 个文件、单文件 100 KB、累计 1 MB；超限或解析失败时标记不完整。
+- 默认最多浏览 5000 个文本文件、总计 64 MB；静态分析默认最多 200 个源码文件、总计 8 MB。上限可在 `config.toml` 调整，超限或解析失败时标记不完整。
+- 多语言静态解析当前覆盖 Python、C/C++、Go、Java、JavaScript/TypeScript 和 Rust；复杂宏、动态导入、生成代码和其他语言先提供只读浏览，关系覆盖会标记不完整。
 - 图是文件级静态 import 关系，不代表运行时调用；不保证复杂包路径与动态导入解析。
 - 模型根据元数据推测职责，尚无主动探索源码的完整 Agent、背包问答或增量索引。
 - 当前通过本地浏览器运行，尚无 Tauri 桌面安装包；代码着色是轻量 Python 词法着色，不替代 Monaco 语言服务。

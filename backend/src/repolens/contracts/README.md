@@ -8,4 +8,4 @@ NodeDraft、EdgeDraft 和 GraphDraft 为 dataclass 模型。schema_for() 根据�
 
 dependency_preview(index) 生成无模型的本地 import 预览，界面会明确标识。
 
-验证：ContractTests 覆盖 ID、锚点、依赖、布尔类型、NaN 与 schema 派生。运行方式见 [服务说明](../../../../README.md)。当前仅支持文件级 import 图。
+验证：ContractTests 覆盖 ID、锚点、依赖、布尔类型、NaN 与 schema 派生。运行方式见 [服务说明](../../../../README.md)。当前图仍是文件级静态依赖图，语言适配器提供的边必须有本地索引证据。

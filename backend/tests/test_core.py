@@ -14,6 +14,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from repolens.analysis import analyze
+from repolens.config import load_config
 from repolens.contracts import dependency_preview, schema_for, validate_graph
 from repolens.errors import RepoLensError
 from repolens.indexing import scan_repository
@@ -21,6 +22,26 @@ from repolens.llm import Completion, DeepSeekClient, ENDPOINT
 from repolens import platform as credentials
 from repolens.platform import dialogs
 from repolens.server import AppState, LocalServer
+
+
+class ConfigTests(unittest.TestCase):
+    def test_reads_limits_agent_and_relative_log_path(self):
+        root = Path(__file__).resolve().parents[2] / ".repolens" / "tests"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / ("config_" + uuid.uuid4().hex + ".toml")
+        path.write_text(
+            "[server]\nlog_dir = 'custom-logs'\nport = 1234\n"
+            "[limits]\nbrowse_files = 900\n[agent]\nmax_rounds = 4\n",
+            encoding="utf-8",
+        )
+        try:
+            config = load_config(path)
+        finally:
+            path.unlink(missing_ok=True)
+        self.assertEqual(config.limits.browse_files, 900)
+        self.assertEqual(config.agent.max_rounds, 4)
+        self.assertEqual(config.server.port, 1234)
+        self.assertTrue(config.server.log_dir.is_absolute())
 
 
 class RepositoryCase(unittest.TestCase):
@@ -93,11 +114,30 @@ class IndexTests(RepositoryCase):
         paths = {file.id: file.path for file in index.files.values()}
         self.assertIn(("src/demo/a.py", "src/demo/b.py"), {(paths[a], paths[b]) for a, b in index.edges})
 
+    def test_static_language_adapters_build_local_edges(self):
+        (self.root / "lib.h").write_text("class Widget {};\n", encoding="utf-8")
+        (self.root / "main.cpp").write_text('#include "lib.h"\nint main() { return 0; }\n', encoding="utf-8")
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "helper.go").write_text("package pkg\nfunc Help() {}\n", encoding="utf-8")
+        (self.root / "main.go").write_text('package main\nimport "pkg/helper"\nfunc main() { pkg.Help() }\n', encoding="utf-8")
+        (self.root / "helper.js").write_text("export function help() {}\n", encoding="utf-8")
+        (self.root / "main.js").write_text("import { help } from './helper.js';\nhelp();\n", encoding="utf-8")
+        index = scan_repository(self.root)
+        languages = {file.path: file.language for file in index.files.values()}
+        self.assertEqual(languages["main.cpp"], "C++")
+        self.assertEqual(languages["main.go"], "Go")
+        self.assertEqual(languages["main.js"], "JavaScript")
+        paths = {file.id: file.path for file in index.files.values()}
+        edge_paths = {(paths[source], paths[target]) for source, target in index.edges}
+        self.assertIn(("main.cpp", "lib.h"), edge_paths)
+        self.assertIn(("main.go", "pkg/helper.go"), edge_paths)
+        self.assertIn(("main.js", "helper.js"), edge_paths)
+
     def test_file_limit_marks_incomplete(self):
-        for number in range(45):
+        for number in range(205):
             (self.root / f"extra_{number}.py").write_text("pass", encoding="utf-8")
         index = scan_repository(self.root)
-        self.assertEqual(len(index.files), 40)
+        self.assertEqual(len(index.files), 200)
         self.assertTrue(dependency_preview(index)["incomplete"])
 
     def test_does_not_execute_target(self):

@@ -3,19 +3,21 @@ import { renderSource } from './source.mjs';
 
 const $ = id => document.getElementById(id);
 let repository = null, graph = null, selection = null, sourceRequest = 0, busy = false;
+let uploadLimits = { files: 5000, fileBytes: 1000000, totalBytes: 64000000 };
+let analysisTimeoutMs = 75000;
 const expanded = new Set();
 const view = new GraphView($('graph'), id => openSource(id));
 
 async function api(path, body) {
   let response;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), path === '/api/analyze' ? 75000 : 20000);
+  const timeout = setTimeout(() => controller.abort(), path === '/api/analyze' ? analysisTimeoutMs : 20000);
   try {
     response = await fetch(path, body === undefined ? {} : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal,
     });
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error(path === '/api/analyze' ? '模型请求超过 75 秒，已停止等待；请检查模型名、网络和余额后重试。' : '本地操作超时，请关闭选择器后重试。');
+    if (error.name === 'AbortError') throw new Error(path === '/api/analyze' ? `模型请求超过 ${Math.round(analysisTimeoutMs / 1000)} 秒，已停止等待；请检查模型名、网络和余额后重试。` : '本地操作超时，请关闭选择器后重试。');
     throw new Error('无法连接本地服务，请检查服务是否仍在运行。');
   } finally { clearTimeout(timeout); }
   const value = await response.json();
@@ -118,7 +120,7 @@ async function openSource(id) {
     $('source-title').textContent = source.path.split('/').at(-1);
     $('source-anchor').textContent = source.path + (id !== source.id ? ' › ' + source.anchor.name : '');
     $('source-position').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} · ${source.end_line} 行`;
-    $('source-language').textContent = (source.path.endsWith('.py') ? 'Python' : '文本') + ' · 只读';
+    $('source-language').textContent = (source.language || '文本') + ' · 只读';
     $('selection-name').textContent = id !== source.id ? source.anchor.name : source.path.split('/').at(-1);
     $('selection-location').textContent = `L${source.anchor.start_line}–${source.anchor.end_line} ↗`;
     $('node-summary').textContent = node?.summary || '当前文件可本地浏览，未纳入这张模块图。';
@@ -151,7 +153,7 @@ async function imported(result) {
   repository = result.repository; selection = null; sourceRequest++;
   $('consent').checked = false; $('project-name').textContent = repository.name; $('tree-root').textContent = repository.name;
   $('file-count').textContent = repository.files.length; $('repo-path').value = repository.path;
-  $('index-status').textContent = `${repository.analyzed_count} 个 Python 文件已索引`;
+  $('index-status').textContent = `${repository.analyzed_count} 个源文件已索引`;
   renderTree(); renderGraph(result.graph);
   const entry = result.graph?.nodes.find(n => n.entry);
   const fileId = sameRepository && repository.files.some(f => f.id === previous?.file) ? previous.file : (entry?.id || repository.files[0]?.id);
@@ -162,16 +164,16 @@ $('path-form').addEventListener('submit', e => { e.preventDefault(); task(async 
 async function uploadFolder(fileList) {
   const files = [...fileList];
   if (!files.length) return;
-  if (files.length > 400) throw new Error('试用版最多导入 400 个文本文件。');
+  const supportedSuffixes = ['py','md','txt','json','toml','yaml','yml','ini','cfg','js','jsx','ts','tsx','html','css','sql','rs','go','java','c','h','cpp','hpp'];
+  const eligible = files.filter(file => supportedSuffixes.includes((file.webkitRelativePath || file.name).toLowerCase().split('.').pop()));
+  if (eligible.length > uploadLimits.files) throw new Error(`最多处理 ${uploadLimits.files.toLocaleString()} 个可浏览文本文件，请选择更小的目录或使用路径导入。`);
   const selected = [];
   let bytes = 0;
-  for (const file of files) {
+  for (const file of eligible) {
     const path = file.webkitRelativePath || file.name;
-    const suffix = path.toLowerCase().split('.').pop();
-    const supported = ['py','md','txt','json','toml','yaml','yml','ini','cfg','js','jsx','ts','tsx','html','css','sql','rs','go','java','c','h','cpp','hpp'].includes(suffix);
-    if (!supported || file.size > 100000) continue;
+    if (file.size > uploadLimits.fileBytes) continue;
     bytes += file.size;
-    if (bytes > 4000000) throw new Error('所选文本内容超过 4 MB，请选择更小的项目目录。');
+    if (bytes > uploadLimits.totalBytes) throw new Error(`所选文本内容超过 ${(uploadLimits.totalBytes / 1000000).toFixed(0)} MB，请选择更小的项目目录。`);
     selected.push({ path, content: await file.text() });
   }
   if (!selected.length) throw new Error('目录中没有可浏览的文本文件。');
@@ -197,7 +199,7 @@ $('save-key').addEventListener('click', () => task(async () => {
 }));
 $('delete-key').addEventListener('click', () => task(async () => { await api('/api/key/delete', {}); $('api-key').value = ''; keyState(false, false); $('settings-feedback').textContent = '内存 Key 与已保存凭据已清除。'; }));
 $('analyze').addEventListener('click', () => task(async () => {
-  if (!repository) throw new Error('请先打开 Python 项目。');
+  if (!repository) throw new Error('请先打开代码项目。');
   if (!$('consent').checked) throw new Error('请先勾选同意发送当前索引摘要。');
   const result = await api('/api/analyze', { goal: $('goal').value, model: $('model').value, confirmed: true });
   renderGraph(result.graph); if (selection) await openSource(selection.anchor);
@@ -208,6 +210,12 @@ $('zoom-fit').addEventListener('click', () => view.fit());
 $('focus-graph').addEventListener('click', () => view.fit());
 $('layout-reset').addEventListener('click', () => view.reset());
 api('/api/state').then(async state => {
+  if (state.limits) uploadLimits = {
+    files: state.limits.browse_files,
+    fileBytes: state.limits.browse_file_bytes,
+    totalBytes: state.limits.browse_bytes,
+  };
+  if (state.agent?.request_timeout_seconds) analysisTimeoutMs = state.agent.request_timeout_seconds * 1000 + 15000;
   keyState(state.key_configured, state.key_saved); $('model').value = state.default_model;
   if (state.repository) await imported(state);
   if (state.key_error) notice(state.key_error, true);

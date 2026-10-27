@@ -13,19 +13,31 @@ import threading
 LOGGER_NAME = "repolens"
 MAX_BYTES = 2 * 1024 * 1024
 BACKUP_COUNT = 3
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _configured = False
 _lock = threading.Lock()
 
 
 def log_directory() -> Path:
-    """Return the per-user log directory without creating it."""
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "RepoLens" / "logs"
-    return Path.home() / ".repolens" / "logs"
+    """Return the default project-local log directory without creating it."""
+    return PROJECT_ROOT / "logs"
 
 
-def configure_logging() -> Path | None:
+def _configured_directory(log_dir: str | Path | None) -> Path:
+    value = log_dir
+    if value is None:
+        value = os.environ.get("REPOLENS_LOG_DIR")
+    if value is None or not str(value).strip():
+        return log_directory()
+    return Path(os.path.expandvars(str(value))).expanduser()
+
+
+def _file_handler(logger: logging.Logger) -> RotatingFileHandler | None:
+    return next((handler for handler in logger.handlers
+                 if isinstance(handler, RotatingFileHandler)), None)
+
+
+def configure_logging(log_dir: str | Path | None = None) -> Path | None:
     """Configure console and rotating file handlers once.
 
     A file permission failure must not stop the local server; console logging
@@ -36,18 +48,31 @@ def configure_logging() -> Path | None:
         logger = logging.getLogger(LOGGER_NAME)
         logger.setLevel(logging.INFO)
         logger.propagate = False
-        if _configured:
-            return next((Path(handler.baseFilename) for handler in logger.handlers
-                         if isinstance(handler, RotatingFileHandler)), None)
+        requested = _configured_directory(log_dir)
+        requested_resolved = requested.resolve()
+        current = _file_handler(logger)
+        if _configured and current and (log_dir is None or
+                                       Path(current.baseFilename).parent == requested_resolved):
+            return Path(current.baseFilename) if current else None
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S%z",
         )
-        console = logging.StreamHandler(sys.stdout)
-        console.setFormatter(formatter)
-        logger.addHandler(console)
+        if not _configured:
+            console = logging.StreamHandler(sys.stdout)
+            console.setFormatter(formatter)
+            logger.addHandler(console)
+        elif current:
+            logger.removeHandler(current)
+            current.close()
         path = None
-        directories = [log_directory(), Path.cwd() / ".repolens" / "logs"]
+        directories = [requested]
+        default = log_directory()
+        if default.resolve() != requested_resolved:
+            directories.append(default)
+        legacy = Path.cwd() / ".repolens" / "logs"
+        if legacy not in directories:
+            directories.append(legacy)
         for directory in directories:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
@@ -62,7 +87,7 @@ def configure_logging() -> Path | None:
             except (OSError, PermissionError):
                 continue
         if path is None:
-            logger.info("logging.file_unavailable")
+            logger.warning("logging.file_unavailable requested=%s", requested)
         _configured = True
         return path
 

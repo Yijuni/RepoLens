@@ -1,0 +1,9 @@
+# 运行配置
+
+统一读取仓库根目录的 `config.toml`。仓库提供 `config.example.toml` 作为无凭据模板；实际配置文件默认被 Git 忽略。配置在服务每次启动时读取，环境变量 `REPOLENS_CONFIG` 可指定另一个配置文件。
+
+配置分为三组：`server` 控制日志目录、端口和是否自动打开浏览器；`limits` 控制目录浏览、源码读取、跨语言静态分析和目录遍历上限；`agent` 控制当前模型分析允许的轮数、token 预算、上下文长度和请求超时。配置值会进行范围校验，非法值回退默认值并写入诊断日志。
+
+API Key 不属于配置文件，仍通过网页设置并使用 Windows 凭据管理器保存。
+
+验证：复制 `config.example.toml` 为 `config.toml`，修改 `server.log_dir` 或 `limits.browse_files` 后重启服务，查看启动输出和 `/api/state` 返回的 `limits`。配置读取不执行任何仓库代码。

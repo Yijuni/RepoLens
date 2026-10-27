@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import secrets
 import shutil
@@ -14,16 +15,25 @@ from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
 from repolens.analysis import analyze
+from repolens.config import get_config
 from repolens.contracts import dependency_preview
 from repolens.diagnostics import configure_logging, error_text, get_logger
 from repolens.errors import RepoLensError
-from repolens.indexing import MAX_BROWSE_BYTES, MAX_BROWSE_FILES, MAX_FILE_BYTES, scan_repository
+from repolens.indexing import (
+    MAX_BROWSE_BYTES,
+    MAX_BROWSE_FILE_BYTES,
+    MAX_BROWSE_FILES,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+    scan_repository,
+)
 from repolens.llm import DEFAULT_MODEL, DeepSeekClient, validate_key
 from repolens import platform as credentials
 from repolens.platform.dialogs import choose_directory
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+MAX_UPLOAD_REQUEST_BYTES = MAX_BROWSE_BYTES + 8_000_000
 LOGGER = get_logger()
 
 
@@ -56,8 +66,17 @@ class AppState:
                 self.key_error = str(exc)
 
     def summary(self) -> dict:
+        config = get_config()
         return {"key_configured": bool(self.api_key), "key_saved": self.saved,
                 "key_error": self.key_error, "default_model": DEFAULT_MODEL,
+                "limits": {"browse_files": MAX_BROWSE_FILES,
+                            "browse_file_bytes": MAX_BROWSE_FILE_BYTES,
+                            "browse_bytes": MAX_BROWSE_BYTES,
+                            "analysis_files": MAX_FILES,
+                            "analysis_file_bytes": config.limits.analysis_file_bytes,
+                            "analysis_bytes": MAX_TOTAL_BYTES},
+                "agent": {"max_rounds": config.agent.max_rounds,
+                          "request_timeout_seconds": config.agent.request_timeout_seconds},
                 "busy": self.lock.locked() or self.picker_pending(), "phase": self.phase,
                 "repository": self.repository_summary(), "graph": self.graph}
 
@@ -131,6 +150,7 @@ class AppState:
         return {"name": self.repository_label or self.index.root.name, "path": str(self.index.root),
                 "files": [{"id": file.id, "path": file.path,
                            "analyzed": file.id in self.index.files,
+                           "language": getattr(file, "language", "文本"),
                            "symbols": [symbol.summary() for symbol in getattr(file, "definitions", ())],
                            "line_count": file.line_count} for file in self.index.documents.values()],
                 "analyzed_count": len(self.index.files),
@@ -139,7 +159,7 @@ class AppState:
 
     def import_uploaded(self, files: list[dict]) -> tuple[object, dict]:
         if not files or len(files) > MAX_BROWSE_FILES:
-            raise RepoLensError(f"请选择不超过 {MAX_BROWSE_FILES} 个文件的目录。")
+            raise RepoLensError(f"请选择不超过 {MAX_BROWSE_FILES} 个可浏览文本文件的目录。")
         total = 0
         root_name = "上传项目"
         staging = self.upload_root
@@ -164,8 +184,10 @@ class AppState:
                     raise RepoLensError("目录包含无效的文件路径。")
                 content = item["content"]
                 encoded_size = len(content.encode("utf-8"))
-                if encoded_size > MAX_FILE_BYTES or total + encoded_size > MAX_BROWSE_BYTES:
-                    raise RepoLensError(f"上传内容不能超过 {MAX_BROWSE_BYTES // 1_000_000} MB。")
+                if encoded_size > MAX_BROWSE_FILE_BYTES:
+                    raise RepoLensError(f"单个文件不能超过 {MAX_BROWSE_FILE_BYTES // 1_000_000} MB。")
+                if total + encoded_size > MAX_BROWSE_BYTES:
+                    raise RepoLensError(f"上传文本总量不能超过 {MAX_BROWSE_BYTES // 1_000_000} MB。")
                 target = staging / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 encoded = content.encode("utf-8")
@@ -294,13 +316,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.command == "GET" and path == "/api/source":
             if not state.index:
-                raise RepoLensError("请先导入 Python 仓库。")
+                raise RepoLensError("请先导入代码仓库。")
             file_id = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
             self._json(200, state.index.source(file_id))
             return
         if self.command != "POST":
             raise RepoLensError("接口不存在。", 404)
-        body = self._body(8 * 1024 * 1024 if path == "/api/repository/upload" else 16_384)
+        body = self._body(MAX_UPLOAD_REQUEST_BYTES if path == "/api/repository/upload" else 16_384)
         if path == "/api/repository/pick":
             state.begin_picker()
             self._json(202, {"pending": True})
@@ -329,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
                 LOGGER.info("key.deleted")
                 self._json(200, {"key_configured": False, "key_saved": False})
             elif path in ("/api/repository", "/api/example"):
-                state.phase = "正在建立 Python 索引……"
+                state.phase = "正在建立代码索引……"
                 if path == "/api/example":
                     root = PROJECT_ROOT / "samples" / "mini_project"
                 else:
@@ -355,13 +377,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise RepoLensError("请先确认将当前索引摘要发送至 DeepSeek。")
                 if state.index is None or not state.api_key:
                     raise RepoLensError("请先导入仓库并配置 DeepSeek API Key。")
-                client = state.client_factory(state.api_key, model=body.get("model", DEFAULT_MODEL))
+                agent_config = get_config().agent
+                client = state.client_factory(state.api_key, model=body.get("model", DEFAULT_MODEL),
+                                              timeout=agent_config.request_timeout_seconds)
                 model_name = getattr(client, "model", body.get("model", DEFAULT_MODEL))
                 LOGGER.info("analysis.start model=%s goal_chars=%d files=%d",
                             model_name, len(body.get("goal", "")) if isinstance(body.get("goal", ""), str) else -1,
                             len(state.index.files))
                 graph = analyze(state.index, body.get("goal", ""), client,
-                                lambda message: setattr(state, "phase", message))
+                                lambda message: setattr(state, "phase", message), settings=agent_config)
                 state.graph = graph
                 LOGGER.info("analysis.complete model=%s requests=%d tokens=%d elapsed_ms=%d",
                             model_name, graph["usage"]["requests"], graph["usage"]["total_tokens"],
@@ -390,22 +414,31 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    log_path = configure_logging()
-    parser = argparse.ArgumentParser(description="RepoLens 最小 DeepSeek 试用版")
-    parser.add_argument("--repo", help="启动时导入的 Python 仓库；默认使用内置示例")
-    parser.add_argument("--port", type=int, default=0, help="本机端口，默认随机")
+    config = get_config()
+    parser = argparse.ArgumentParser(description="RepoLens 本地 DeepSeek 代码理解服务")
+    parser.add_argument("--repo", help="启动时导入的代码仓库；默认使用内置示例")
+    parser.add_argument("--port", type=int, default=None, help="本机端口；默认读取 config.toml")
+    parser.add_argument("--log-dir", help="日志目录；默认写入仓库根目录 logs，也可用 REPOLENS_LOG_DIR")
     parser.add_argument("--open", action="store_true", help="启动后打开浏览器")
     args = parser.parse_args()
-    if not 0 <= args.port <= 65535:
+    port = config.server.port if args.port is None else args.port
+    if not 0 <= port <= 65535:
         parser.error("端口必须为 0–65535")
+    configured_log_dir = args.log_dir or os.environ.get("REPOLENS_LOG_DIR") or config.server.log_dir
+    log_path = configure_logging(configured_log_dir)
+    for warning in config.warnings:
+        LOGGER.warning("config.invalid detail=%s", warning)
+    LOGGER.info("config.loaded path=%s log_dir=%s max_rounds=%d browse_files=%d analysis_files=%d",
+                config.path.name, configured_log_dir, config.agent.max_rounds,
+                config.limits.browse_files, config.limits.analysis_files)
     try:
         state = AppState(args.repo or PROJECT_ROOT / "samples" / "mini_project")
-        with LocalServer(args.port, state) as server:
+        with LocalServer(port, state) as server:
             print(f"RepoLens: {server.origin}", flush=True)
             print(f"日志文件: {log_path or '仅终端输出'}", flush=True)
             LOGGER.info("server.started origin=%s log=%s", server.origin, log_path or "console")
             print("仅本机访问；Ctrl+C 退出。API Key 请在页面输入，不要放入命令行。", flush=True)
-            if args.open:
+            if args.open or config.server.open_browser:
                 webbrowser.open(server.origin)
             server.serve_forever()
     except RepoLensError as exc:

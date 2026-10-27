@@ -107,8 +107,8 @@ def validate_graph(raw: dict, index: RepositoryIndex) -> dict:
 
 def dependency_preview(index: RepositoryIndex) -> dict:
     return validate_graph({
-        "project_type": "Python · 本地依赖预览",
-        "summary": "由本地 AST 索引生成，尚未调用 DeepSeek。边只表示可解析的文件 import，不代表运行时调用。",
+        "project_type": "多语言 · 本地依赖预览",
+        "summary": "由本地静态索引生成，尚未调用 DeepSeek。边只表示可解析的源码依赖，不代表运行时调用。",
         "nodes": [{"id": file.id, "summary": ("符号：" + ("、".join(file.symbols[:4]) or "模块顶层代码"))[:260],
                    "group": file.path.rpartition("/")[0] or "根目录"} for file in index.files.values()],
         "edges": [{"source": source, "target": target, "type": "import", "confidence": 1.0}

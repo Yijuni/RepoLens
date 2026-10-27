@@ -1,6 +1,5 @@
-"""Read-only, bounded Python AST indexing. Never imports target code."""
+"""Read-only, bounded multi-language indexing. Never imports target code."""
 
-import ast
 from dataclasses import dataclass
 import hashlib
 import io
@@ -9,16 +8,25 @@ from pathlib import Path
 import stat
 import tokenize
 
+from repolens.config import get_config
 from repolens.errors import RepoLensError
+from repolens.indexing.languages import CODE_SUFFIXES, LANGUAGES, parse_source
 
-MAX_FILES = 40
-MAX_FILE_BYTES = 100_000
-MAX_TOTAL_BYTES = 1_000_000
-MAX_BROWSE_FILES = 400
-MAX_BROWSE_BYTES = 4_000_000
+# 浏览范围和模型分析范围是两套上限。浏览范围面向目录树/源码查看，
+# 分析范围还要受本地 AST 成本和模型上下文预算约束；超出分析范围的文件
+# 仍然可以在左侧树中打开，不应被误认为导入失败。
+_LIMITS = get_config().limits
+MAX_FILES = _LIMITS.analysis_files
+MAX_FILE_BYTES = _LIMITS.analysis_file_bytes
+MAX_TOTAL_BYTES = _LIMITS.analysis_bytes
+MAX_BROWSE_FILES = _LIMITS.browse_files
+MAX_BROWSE_FILE_BYTES = _LIMITS.browse_file_bytes
+MAX_BROWSE_BYTES = _LIMITS.browse_bytes
+MAX_DIRECTORIES = _LIMITS.directories
 BROWSE_SUFFIXES = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg",
                    ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".sql", ".rs", ".go", ".java",
-                   ".c", ".h", ".cpp", ".hpp"}
+                   ".c", ".h", ".cc", ".cxx", ".cpp", ".hh", ".hpp", ".cs", ".kt", ".kts",
+                   ".swift", ".php", ".rb", ".sh", ".m", ".mm"}
 SKIP_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
     "dist", "build", "target", ".idea", ".vs", ".repolens",
@@ -31,10 +39,10 @@ def _decode(raw: bytes) -> str:
     return raw.decode(encoding)
 
 
-def _read_bounded(path: Path) -> bytes:
+def _read_bounded(path: Path, limit: int = MAX_BROWSE_FILE_BYTES) -> bytes:
     with path.open("rb") as stream:
-        raw = stream.read(MAX_FILE_BYTES + 1)
-    if len(raw) > MAX_FILE_BYTES:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
         raise ValueError("file too large")
     return raw
 
@@ -63,6 +71,7 @@ class TextFile:
     path: str
     fingerprint: str
     line_count: int
+    language: str = "文本"
 
 
 @dataclass(frozen=True)
@@ -76,11 +85,13 @@ class SourceFile:
     targets: tuple[str, ...]
     entry: bool
     definitions: tuple[Symbol, ...] = ()
+    language: str = "Python"
 
     def evidence(self) -> dict:
         return {
             "id": self.id, "path": self.path, "symbols": list(self.symbols[:15]),
             "imports": list(self.imports[:20]), "entry_candidate": self.entry,
+            "language": self.language,
         }
 
 
@@ -126,7 +137,8 @@ class RepositoryIndex:
             raise RepoLensError("源码已移动或不再位于仓库内，请重新导入。", 409) from None
         if hashlib.sha256(raw).hexdigest() != file.fingerprint:
             raise RepoLensError("源码自索引后已改变，请重新导入，避免引用旧行号。", 409)
-        return {"id": file.id, "path": file.path, "start_line": 1,
+        return {"id": file.id, "path": file.path, "language": file.language,
+                "start_line": 1,
                 "end_line": file.line_count, "content": _decode(raw),
                 "anchor": {"id": anchor.id if anchor else file.id,
                            "start_line": anchor.start_line if anchor else 1,
@@ -158,8 +170,8 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
 
     for directory, children, names in os.walk(root, followlinks=False, onerror=traversal_error):
         directory_count += 1
-        if directory_count > 2000:
-            warnings.append("目录数量超过试用版限制，请选择较小的子目录。")
+        if directory_count > MAX_DIRECTORIES:
+            warnings.append(f"目录数量超过 {MAX_DIRECTORIES} 个上限，目录树可能不完整。")
             break
         folder = Path(directory)
         safe_children = []
@@ -189,10 +201,10 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 if _linked(candidate):
                     continue
                 size = candidate.stat().st_size
-                if size > MAX_FILE_BYTES or browse_bytes + size > MAX_BROWSE_BYTES:
+                if size > MAX_BROWSE_FILE_BYTES or browse_bytes + size > MAX_BROWSE_BYTES:
                     warnings.append(f"已跳过较大文件：{relative}")
                     continue
-                raw = _read_bounded(candidate)
+                raw = _read_bounded(candidate, MAX_BROWSE_FILE_BYTES)
                 if browse_bytes + len(raw) > MAX_BROWSE_BYTES:
                     warnings.append(f"已跳过较大文件：{relative}")
                     continue
@@ -204,86 +216,71 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
                 continue
             browse_bytes += len(raw)
             file_id = "file_" + hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
-            documents[file_id] = TextFile(file_id, relative, hashlib.sha256(raw).hexdigest(), max(1, len(text.splitlines())))
-            if suffix != ".py":
+            documents[file_id] = TextFile(file_id, relative, hashlib.sha256(raw).hexdigest(),
+                                          max(1, len(text.splitlines())), LANGUAGES.get(suffix, "文本"))
+            if suffix not in CODE_SUFFIXES:
+                continue
+            if len(raw) > MAX_FILE_BYTES:
+                warnings.append(f"源码文件超过 {MAX_FILE_BYTES // 1024} KB，仅可浏览：{relative}")
                 continue
             if len(files) >= MAX_FILES or total_bytes + len(raw) > MAX_TOTAL_BYTES:
-                warnings.append(f"分析最多 {MAX_FILES} 个 Python 文件、累计 1 MB；部分文件仅可浏览。")
+                warnings.append(f"源码分析最多 {MAX_FILES} 个文件、累计 {MAX_TOTAL_BYTES // 1_000_000} MB；部分文件仅可浏览。")
                 continue
             try:
-                tree = ast.parse(text, filename=relative)
+                parsed = parse_source(relative, text)
             except (SyntaxError, ValueError, RecursionError):
                 warnings.append(f"无法解析，仅可浏览：{relative}")
                 continue
             total_bytes += len(raw)
-            imports: set[str] = set()
-            targets: set[str] = set()
-            module = relative.removesuffix(".py").replace("/", ".")
-            package = module.removesuffix(".__init__") if name == "__init__.py" else module.rpartition(".")[0]
-            for item in ast.walk(tree):
-                if isinstance(item, ast.Import):
-                    for alias in item.names:
-                        imports.add(alias.name)
-                        targets.add(alias.name)
-                elif isinstance(item, ast.ImportFrom):
-                    imports.add("." * item.level + (item.module or ""))
-                    if item.level:
-                        parts = package.split(".") if package else []
-                        if item.level > len(parts):
-                            continue
-                        base = ".".join(parts[:len(parts) - item.level + 1])
-                        base = ".".join(filter(None, [base, item.module]))
-                    else:
-                        base = item.module or ""
-                    if base:
-                        targets.add(base)
-                    for alias in item.names:
-                        targets.add(".".join(filter(None, [base, alias.name])))
-            symbols = tuple(
-                item.name for item in tree.body
-                if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-            )
             definitions = []
-
-            def add_definition(item, prefix=""):
-                qualified = prefix + item.name
+            for symbol_name, qualified, kind, start_line, end_line in parsed.definitions:
                 symbol_id = "symbol_" + hashlib.sha256((relative + ":" + qualified).encode("utf-8")).hexdigest()[:16]
-                definitions.append(Symbol(symbol_id, item.name, qualified,
-                                          "class" if isinstance(item, ast.ClassDef) else "function",
-                                          min([item.lineno] + [decorator.lineno for decorator in item.decorator_list]),
-                                          item.end_lineno or item.lineno))
-                if isinstance(item, ast.ClassDef):
-                    for member in item.body:
-                        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                            add_definition(member, qualified + ".")
-
-            for item in tree.body:
-                if isinstance(item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                    add_definition(item)
+                definitions.append(Symbol(symbol_id, symbol_name, qualified, kind, start_line, end_line))
             files[file_id] = SourceFile(
-                file_id, relative, hashlib.sha256(raw).hexdigest(),
-                max(1, len(text.splitlines())), symbols, tuple(sorted(imports)),
-                tuple(sorted(targets)),
-                name in {"main.py", "__main__.py", "app.py"} or any(
-                    isinstance(item, ast.Constant) and item.value == "__main__"
-                    for item in ast.walk(tree)
-                ), tuple(definitions),
+                id=file_id, path=relative, fingerprint=hashlib.sha256(raw).hexdigest(),
+                line_count=max(1, len(text.splitlines())), symbols=parsed.symbols,
+                imports=parsed.imports, targets=parsed.targets, entry=parsed.entry,
+                definitions=tuple(definitions), language=parsed.language,
             )
             documents[file_id] = files[file_id]
         if stopped:
             break
     if not files:
-        raise RepoLensError("未找到可解析的 Python 文件；首版仅支持 Python 仓库。")
+        raise RepoLensError("未找到可解析的代码文件；请确认目录包含受支持的源码或文本文件。")
     aliases: dict[str, str] = {}
     for file in files.values():
-        module = file.path.removesuffix(".py").replace("/", ".")
-        aliases[module.removesuffix(".__init__")] = file.id
-        if module.startswith("src."):
-            aliases[module[4:].removesuffix(".__init__")] = file.id
+        relative = file.path.replace("\\", "/")
+        stem = relative.rsplit(".", 1)[0] if "." in relative.rsplit("/", 1)[-1] else relative
+        aliases[relative] = file.id
+        aliases[stem] = file.id
+        aliases[stem.replace("/", ".")] = file.id
+        if file.language == "Python":
+            module = stem.replace("/", ".")
+            aliases[module.removesuffix(".__init__")] = file.id
+            if module.startswith("src."):
+                aliases[module[4:].removesuffix(".__init__")] = file.id
+
+    def candidates(file: SourceFile, target: str):
+        raw = target.strip().strip("'\"").replace("\\", "/")
+        values = [raw, raw.lstrip("./"), raw.replace("::", "/")]
+        if raw.startswith("."):
+            parent = Path(file.path).parent.as_posix()
+            values.append((Path(parent) / raw).as_posix())
+        if file.language in {"Java", "Python"} or "." in raw:
+            values.append(raw.replace(".", "/"))
+        expanded = []
+        for value in values:
+            expanded.append(value)
+            for suffix in (".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".rs", ".c", ".h", ".cpp", ".hpp"):
+                expanded.append(value + suffix)
+            if value.endswith(".__init__"):
+                expanded.append(value.removesuffix(".__init__"))
+        return expanded
+
     edges: set[tuple[str, str]] = set()
     for file in files.values():
         for target in file.targets:
-            target_id = aliases.get(target)
+            target_id = next((aliases.get(value) for value in candidates(file, target) if aliases.get(value)), None)
             if target_id and target_id != file.id:
                 edges.add((file.id, target_id))
     snapshot_text = "|".join(f"{file.id}:{file.fingerprint}" for file in documents.values())
