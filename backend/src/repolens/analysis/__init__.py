@@ -1,6 +1,7 @@
 """Minimal bounded map-to-graph pipeline, not a full autonomous tool loop."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -13,7 +14,7 @@ from repolens.llm import Completion
 PROMPTS = Path(__file__).resolve().parent.parent / "prompts" / "v1"
 _DEFAULT_AGENT = get_config().agent
 # Compatibility aliases for callers that imported the prototype constants.
-MAX_REQUESTS = _DEFAULT_AGENT.max_rounds
+MAX_REQUESTS = min(2, _DEFAULT_AGENT.max_rounds)
 TOKEN_BUDGET = _DEFAULT_AGENT.token_budget
 MAX_OUTPUT = _DEFAULT_AGENT.max_output_tokens
 
@@ -26,6 +27,7 @@ def analyze(index: RepositoryIndex, goal: str, client: ModelClient,
             progress: Callable[[str], None] = lambda _message: None,
             settings: AgentConfig | None = None) -> dict:
     settings = settings or get_config().agent
+    settings = replace(settings, max_rounds=min(2, settings.max_rounds))
     if not isinstance(goal, str) or len(goal) > 1000:
         raise RepoLensError("学习目标最多 1000 字符。")
     index.assert_current()

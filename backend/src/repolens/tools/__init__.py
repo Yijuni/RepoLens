@@ -16,6 +16,70 @@ MAX_TOOL_OUTPUT_CHARS = 16_000
 MAX_SEARCH_RESULTS = 100
 
 
+def validate_arguments(value, schema: dict, path: str = "arguments") -> None:
+    """Validate the JSON schema subset used by explicitly registered tools."""
+    types = {"object": dict, "array": list, "string": str, "integer": int,
+             "number": (int, float), "boolean": bool}
+    expected = types.get(schema.get("type"))
+    if expected and (not isinstance(value, expected) or
+                     schema.get("type") in {"integer", "number"} and isinstance(value, bool)):
+        raise RepoLensError(f"{path} 类型不正确。")
+    if "enum" in schema and value not in schema["enum"]:
+        raise RepoLensError(f"{path} 使用了不支持的值。")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        if any(key not in value for key in schema.get("required", [])):
+            raise RepoLensError(f"{path} 缺少必填字段。")
+        if schema.get("additionalProperties") is False and set(value) - set(properties):
+            raise RepoLensError(f"{path} 包含未知字段。")
+        for key in value.keys() & properties.keys():
+            validate_arguments(value[key], properties[key], f"{path}.{key}")
+    elif isinstance(value, list):
+        if len(value) > schema.get("maxItems", 10_000):
+            raise RepoLensError(f"{path} 项数超限。")
+        for item in value:
+            validate_arguments(item, schema.get("items", {}), path + "[]")
+    elif isinstance(value, str) and len(value) > schema.get("maxLength", 100_000):
+        raise RepoLensError(f"{path} 文本过长。")
+
+
+def _redact(text: str) -> str:
+    """Mask common credential literals before any tool snippet leaves the process."""
+    text = re.sub(r"(?i)\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{16,})", "[REDACTED]", text)
+    text = re.sub(r"(?im)([\"']?(?:api[_-]?key|access[_-]?token|password|secret|authorization)[\"']?\s*[:=]\s*).+$",
+                  r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
+    return text
+
+
+def _bounded_result(result: dict, limit: int) -> tuple[dict, bool]:
+    """Trim complete rows/items rather than returning a fragment of serialized JSON."""
+    result = json.loads(json.dumps(result, ensure_ascii=False))
+    truncated = False
+    while len(json.dumps(result, ensure_ascii=False)) > limit:
+        truncated = True
+        if isinstance(result.get("content"), str) and result["content"]:
+            lines = result["content"].splitlines()
+            if len(lines) > 1:
+                result["content"] = "\n".join(lines[:max(1, len(lines) // 2)])
+                result["end_line"] = result.get("start_line", 1) + len(result["content"].splitlines()) - 1
+            else:
+                result.pop("content")  # Do not claim a line whose content was omitted.
+                result.pop("start_line", None)
+                result.pop("end_line", None)
+        else:
+            lists = [key for key, value in result.items() if isinstance(value, list) and value]
+            if not lists:
+                return {"truncated": True, "message": "结果过大，请缩小查询范围。"}, True
+            key = max(lists, key=lambda name: len(json.dumps(result[name], ensure_ascii=False)))
+            result[key].pop()
+            if key == "items" and "offset" in result:
+                result["next_offset"] = result["offset"] + len(result[key])
+    if truncated:
+        result["truncated"] = True
+    return result, truncated
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -34,6 +98,7 @@ class ToolRegistry:
         self.index = index
         self._tools: dict[str, ToolSpec] = {}
         self.read_limit = 200
+        self.evidence: dict[str, dict] = {}
 
     def set_read_limit(self, limit: int) -> None:
         """Apply the active Agent read budget to the built-in read tools."""
@@ -66,6 +131,7 @@ class ToolRegistry:
             arguments = {}
         if not isinstance(arguments, dict):
             raise RepoLensError("工具参数必须是 JSON 对象。")
+        validate_arguments(arguments, spec.input_schema)
         try:
             result = spec.handler(arguments)
         except RepoLensError:
@@ -74,16 +140,33 @@ class ToolRegistry:
             raise RepoLensError(f"工具 {name} 执行失败：{type(exc).__name__}", 500) from None
         if not isinstance(result, dict):
             raise RepoLensError(f"工具 {name} 返回格式无效。", 500)
+        bounded, truncated = _bounded_result(result, spec.max_output_chars)
         evidence_id = "ev_" + hashlib.sha256((self.index.snapshot + "|" + name + "|" +
                                                json.dumps(arguments, ensure_ascii=False, sort_keys=True) + "|" +
-                                               json.dumps(result, ensure_ascii=False, sort_keys=True)).encode("utf-8")).hexdigest()[:20]
-        bounded = json.loads(json.dumps(result, ensure_ascii=False))
-        serialized = json.dumps(bounded, ensure_ascii=False)
-        truncated = len(serialized) > spec.max_output_chars
-        if truncated:
-            bounded = {"truncated": True, "preview": serialized[:spec.max_output_chars]}
-        return {"tool": name, "evidence": {"evidence_id": evidence_id, "tool": name,
-                "snapshot": self.index.snapshot, "truncated": truncated}, "result": bounded}
+                                               json.dumps(bounded, ensure_ascii=False, sort_keys=True)).encode("utf-8")).hexdigest()[:20]
+        anchors = []
+        def collect(value):
+            if isinstance(value, dict):
+                file = self.index.documents.get(value.get("file_id"))
+                if file:
+                    content = "content" in value or "text" in value
+                    start = value.get("start_line", value.get("line", 1))
+                    end = value.get("end_line", value.get("line", file.line_count))
+                    anchors.append({"anchor_id": value.get("symbol_id", file.id), "file_id": file.id,
+                                    "fingerprint": file.fingerprint, "start_line": start, "end_line": end,
+                                    "observation": "content" if content else "metadata"})
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        collect(bounded)
+        evidence = {"evidence_id": evidence_id, "tool": name, "snapshot": self.index.snapshot,
+                    "truncated": truncated or bool(bounded.get("truncated")), "anchors": anchors,
+                    "import_edges": [[item["file_id"], bounded["file_id"]]
+                                     for item in bounded.get("importers", [])] if name == "find_importers" else []}
+        self.evidence[evidence_id] = evidence
+        return {"tool": name, "evidence": evidence, "result": bounded}
 
 
 def _text(args: dict, name: str, default: str = "", limit: int = 240) -> str:
@@ -109,7 +192,7 @@ def _file(index: RepositoryIndex, file_id: str):
 
 def _source_lines(index: RepositoryIndex, file_id: str) -> tuple[dict, list[str]]:
     source = index.source(file_id)
-    return source, source["content"].splitlines()
+    return source, _redact(source["content"]).splitlines() or [""]
 
 
 def build_default_registry(index: RepositoryIndex) -> ToolRegistry:
@@ -168,8 +251,10 @@ def build_default_registry(index: RepositoryIndex) -> ToolRegistry:
         for file in index.files.values():
             for symbol in file.definitions:
                 if symbol.id == symbol_id:
-                    return read_range({"file_id": file.id, "start_line": symbol.start_line, "end_line": symbol.end_line}) | {
-                        "symbol_id": symbol.id, "symbol_name": symbol.qualified_name, "kind": symbol.kind}
+                    end = min(symbol.end_line, symbol.start_line + registry.read_limit - 1)
+                    return read_range({"file_id": file.id, "start_line": symbol.start_line, "end_line": end}) | {
+                        "symbol_id": symbol.id, "symbol_name": symbol.qualified_name, "kind": symbol.kind,
+                        "truncated": end < symbol.end_line, "next_line": end + 1 if end < symbol.end_line else None}
         raise RepoLensError("符号 ID 不在当前索引中。", 404)
 
     def search_text(args: dict) -> dict:

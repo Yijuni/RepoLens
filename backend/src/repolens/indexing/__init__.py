@@ -26,7 +26,7 @@ MAX_DIRECTORIES = _LIMITS.directories
 BROWSE_SUFFIXES = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg",
                    ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".sql", ".rs", ".go", ".java",
                    ".c", ".h", ".cc", ".cxx", ".cpp", ".hh", ".hpp", ".cs", ".kt", ".kts",
-                   ".swift", ".php", ".rb", ".sh", ".m", ".mm"}
+                   ".swift", ".php", ".rb", ".sh", ".m", ".mm", ".xml", ".mod"}
 SKIP_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
     "dist", "build", "target", ".idea", ".vs", ".repolens",
@@ -146,7 +146,7 @@ class RepositoryIndex:
                            "name": anchor.qualified_name if anchor else file.path}}
 
     def assert_current(self) -> None:
-        for file_id in self.files:
+        for file_id in self.documents:
             self.source(file_id)
 
 
@@ -186,7 +186,7 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
         children[:] = safe_children
         for name in sorted(names):
             suffix = Path(name).suffix.lower()
-            if suffix not in BROWSE_SUFFIXES or name.startswith(".") or name.lower() in SKIP_FILES or any(
+            if (suffix not in BROWSE_SUFFIXES and name.lower() not in {"dockerfile", "makefile"}) or name.startswith(".") or name.lower() in SKIP_FILES or any(
                 word in name.lower() for word in ("secret", "credential", ".env", "private_key")
             ):
                 continue
@@ -245,8 +245,8 @@ def scan_repository(path: str | Path) -> RepositoryIndex:
             documents[file_id] = files[file_id]
         if stopped:
             break
-    if not files:
-        raise RepoLensError("未找到可解析的代码文件；请确认目录包含受支持的源码或文本文件。")
+    if not documents:
+        raise RepoLensError("未找到可浏览的文本文件；请确认目录包含源码或文档。")
     aliases: dict[str, str] = {}
     for file in files.values():
         relative = file.path.replace("\\", "/")

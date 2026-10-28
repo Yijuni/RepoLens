@@ -1,13 +1,19 @@
-# 测试
+# 验证
 
-使用标准库 unittest 验证索引、契约、分析流程、传输与本地接口，不需要真实 token。
+标准库 unittest，无需真实 Key：
 
-在仓库根目录执行：
+```powershell
+python -X utf8 -m unittest discover -s backend/tests -v
+```
 
-    python -X utf8 -m unittest discover -s backend/tests -v
+test_core.py 覆盖索引、契约、旧分析流程、传输、HTTP 和 Windows 凭据。test_workflow.py 覆盖正文证据、关系两端、规划探索、可恢复错误、取消、预算、后台任务、SSE、保存恢复与写入失败。临时仓库位于被忽略的 .repolens/tests，使用中文/空格路径，不执行目标代码。
 
-测试仓库创建于已忽略的 .repolens/tests，使用中文和空格路径，正常结束自动清理。测试不执行目标仓库代码。
+可选浏览器检查需要 Node 22+、Chrome/Edge，以及仓库内的 .conda/python.exe：
 
-IndexTests 检查索引；ContractTests 检查图和证据；AnalysisTests 使用模拟模型；ClientTests 模拟 HTTP；ServerTests 测试本地接口。Windows 下 CredentialTests 使用随机独立目标实测虚拟凭据存取，并清理。
+```powershell
+node backend/tests/browser_smoke.cjs
+```
 
-模拟测试不代表真实 API 可用。真实模型验证应使用有效 Key 在页面发起。
+脚本在独立浏览器配置中连接 CDP，启动 browser_server.py 模拟模型并使用测试仓库。检查源码、同意确认、缩放、语义关系、多个锚点、路径保存恢复，以及模拟目录句柄的原地保存/恢复；截图位于 .repolens/preview.png。不会请求 DeepSeek 或读取真实 Key。可用 REPOLENS_BROWSER 环境变量指定 Chrome/Edge 的可执行路径。
+
+原生操作系统目录弹窗、实际 Windows DPI 与大图性能仍需人工验收；模拟通过不能代表真实模型质量。

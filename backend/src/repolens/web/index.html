@@ -1,18 +1,62 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RepoLens · 代码与结构，一起看</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepoLens · 代码与结构，一起看</title>
+<link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script>
+</head>
 <body>
-<header class="topbar"><a class="brand" href="/"><span class="brand-mark">R↗</span>RepoLens</a><span class="top-divider"></span><span id="project-name">工作空间</span><span class="preview-tag">PREVIEW</span><div class="top-actions"><span class="local-indicator"><i></i> 本地 · 只读</span><button id="settings-open" class="subtle">模型设置 <span id="key-dot">○</span></button></div></header>
+<header class="topbar">
+<a class="brand" href="/"><span class="brand-mark">R↗</span>RepoLens</a><span class="top-divider"></span>
+<span id="project-name">工作空间</span><span class="preview-tag">PREVIEW</span>
+<div class="top-actions"><span class="local-indicator"><i></i> 本地 · 源码只读</span><button id="settings-open" class="subtle">模型设置 <span id="key-dot">○</span></button></div>
+</header>
 <div id="notice" role="status" aria-live="polite" hidden></div>
 <main class="workspace">
 <nav class="activity-bar" aria-label="工作区"><span class="activity active" title="项目浏览">▤</span><button id="focus-graph" class="activity" title="适应模块图" aria-label="适应模块图">◈</button><span class="activity-bottom">R</span></nav>
-<aside class="explorer"><div class="panel-header"><h1>资源管理器</h1><span id="file-count" class="counter">0</span></div>
-<div class="import-area"><button id="pick-directory" class="primary">＋ 打开项目文件夹</button><input id="folder-input" type="file" webkitdirectory directory multiple hidden><div class="button-row"><button id="example" class="text-button">试用示例</button><button id="path-toggle" class="text-button" aria-expanded="false">输入路径</button></div><form id="path-form" hidden><label for="repo-path" class="sr-only">项目完整路径</label><input id="repo-path" placeholder="E:\projects\my-project" autocomplete="off"><button id="import" type="submit" class="secondary">导入</button></form></div>
-<div class="tree-heading"><span id="tree-root">尚未打开项目</span><button id="refresh" class="icon-button" title="重新索引" aria-label="重新索引">↻</button></div><label class="filter-wrap"><span>⌕</span><input id="file-filter" type="search" placeholder="查找文件或符号…" aria-label="查找文件或符号"></label><div id="file-list" class="file-tree" aria-label="项目文件与符号"></div><div class="explorer-footer"><span class="status-dot"></span><span id="index-status">等待导入</span></div></aside>
-<section class="editor-panel" aria-label="只读源码"><div class="panel-header editor-tabs"><span class="file-icon">≡</span><h2 id="source-title">欢迎使用 RepoLens</h2><span class="read-only">只读</span></div><div class="breadcrumbs"><span id="source-anchor">选择文件，或点击右侧模块</span><button id="reveal-file" class="text-button">定位文件</button></div><div id="source" class="source" tabindex="0" aria-label="源码内容"><div class="source-placeholder"><div class="welcome-icon">R↗</div><h2>读代码，也看全局。</h2><p>从左侧打开一个项目。<br>点击右侧模块，直接定位到源码。<br>展开文件，查看类和函数。</p><span class="hint">源码始终留在原处，以只读方式打开</span></div></div><div class="editor-footer"><span id="source-position">未选择文件</span><span id="source-language">UTF-8</span></div></section>
-<section class="map-panel" aria-label="项目模块图"><div class="panel-header"><div class="map-heading"><span class="map-icon">◈</span><h2>项目结构</h2></div><span id="mode" class="mode">尚未导入</span></div><div class="graph-toolbar"><span id="graph-stats">0 个模块</span><div class="zoom"><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-fit">适应</button><button id="zoom-in" aria-label="放大">+</button><button id="layout-reset" title="恢复自动布局" aria-label="恢复自动布局">↺</button></div></div><div id="graph-scroll" class="graph-scroll"><svg id="graph" aria-label="可交互项目依赖图"></svg><div id="graph-empty" class="empty"><span>◈</span><h3>从文件到模块，再到全局</h3><p>打开项目，即可查看本地依赖图</p></div><div class="canvas-help">拖动节点 · 拖动画布平移 · 滚轮缩放</div></div>
-<div class="selection-card"><div class="selection-label"><span id="selection-name">选择一个模块</span><span id="selection-location">SOURCE ↗</span></div><p id="node-summary">点击图节点打开源码；点击文件下的符号可定位到定义。</p><div id="symbol-shortcuts" class="symbol-shortcuts"></div></div><details class="overview" open><summary><span id="project-type">项目概览</span><span>⌄</span></summary><p id="project-summary">本地分析提供依赖结构，模型进一步解释职责与语义分组。</p><p id="usage" class="tiny"></p></details><div class="analysis-bar"><label for="goal">理解目标</label><div class="goal-row"><input id="goal" maxlength="1000" placeholder="例如：入口到数据存储的路径"><button id="analyze" class="primary">生成语义图 ↗</button></div><label class="check consent"><input id="consent" type="checkbox">同意在确认后让 Agent 按需读取代码片段 <span title="模型不会自动运行；只读取本地工具返回的有限源码证据">ⓘ</span></label><div class="button-row"><button id="save-architecture" class="secondary" disabled>保存架构图</button><span class="tiny">导入项目不会自动生成</span></div></div></section>
+<aside class="explorer">
+<div class="panel-header"><h1>资源管理器</h1><span id="file-count" class="counter">0</span></div>
+<div class="import-area">
+<button id="pick-directory" class="primary">＋ 打开项目文件夹</button><input id="folder-input" type="file" webkitdirectory directory multiple hidden>
+<div class="button-row"><button id="example" class="text-button">试用示例</button><button id="path-toggle" class="text-button" aria-expanded="false">输入路径</button></div>
+<form id="path-form" hidden><label for="repo-path" class="sr-only">项目完整路径</label><input id="repo-path" placeholder="E:\projects\my-project" autocomplete="off"><button id="import" type="submit" class="secondary">导入</button></form>
+</div>
+<div class="tree-heading"><span id="tree-root">尚未打开项目</span><button id="refresh" class="icon-button" title="重新索引" aria-label="重新索引">↻</button></div>
+<label class="filter-wrap"><span>⌕</span><input id="file-filter" type="search" placeholder="查找文件或符号…" aria-label="查找文件或符号"></label>
+<div id="file-list" class="file-tree" aria-label="项目文件与符号"></div><div class="explorer-footer"><span class="status-dot"></span><span id="index-status">等待导入</span></div>
+</aside>
+<section class="editor-panel" aria-label="只读源码">
+<div class="panel-header editor-tabs"><span class="file-icon">≡</span><h2 id="source-title">欢迎使用 RepoLens</h2><span class="read-only">只读</span></div>
+<div class="breadcrumbs"><span id="source-anchor">选择文件，或点击右侧模块</span><button id="reveal-file" class="text-button">定位文件</button></div>
+<div id="source" class="source" tabindex="0" aria-label="源码内容"><div class="source-placeholder"><div class="welcome-icon">R↗</div><h2>读代码，也看全局。</h2><p>从左侧打开一个项目。<br>点击右侧模块，直接定位到源码。<br>展开文件，查看类和函数。</p><span class="hint">源码只读；架构图仅在明确保存时写入</span></div></div>
+<div class="editor-footer"><span id="source-position">未选择文件</span><span id="source-language">UTF-8</span></div>
+</section>
+<section class="map-panel" aria-label="项目模块图">
+<div class="panel-header"><div class="map-heading"><span class="map-icon">◈</span><h2>项目结构</h2></div><span id="mode" class="mode">尚未导入</span></div>
+<div class="graph-toolbar"><span id="graph-stats">0 个模块</span><div class="zoom"><button id="zoom-out" aria-label="缩小">−</button><button id="zoom-fit">适应</button><button id="zoom-in" aria-label="放大">+</button><button id="layout-reset" title="恢复自动布局" aria-label="恢复自动布局">↺</button></div></div>
+<div id="graph-scroll" class="graph-scroll"><svg id="graph" aria-label="可交互项目架构图"></svg><div id="graph-empty" class="empty"><span>◈</span><h3>从文件到模块，再到全局</h3><p>打开项目查看本地预览；确认生成后分析架构</p></div><div class="canvas-help">拖动节点 · 拖动画布平移 · 滚轮缩放</div></div>
+<div class="graph-legend"><span>依赖 / 调用</span><span class="async">异步分发</span><span class="support">配置 / 辅助</span><span>语义推断见连线提示</span></div>
+<div class="selection-card"><div class="selection-label"><span id="selection-name">选择一个模块</span><span id="selection-location">SOURCE ↗</span></div><p id="node-summary">点击模块打开源码，模块内可切换多个文件或符号。</p><div id="symbol-shortcuts" class="symbol-shortcuts"></div></div>
+<details class="overview" open><summary><span id="project-type">项目概览</span><span>⌄</span></summary><p id="project-summary">本地预览提供静态依赖，模型通过工具进一步理解架构。</p><p id="usage" class="tiny"></p></details>
+<div class="analysis-bar">
+<label for="goal">理解目标</label><div class="goal-row"><input id="goal" maxlength="1000" placeholder="例如：入口到数据存储的路径"><button id="analyze" class="primary">生成语义图 ↗</button></div>
+<label class="check consent"><input id="consent" type="checkbox">同意确认后向 DeepSeek 按需发送代码片段与文档 <span title="导入不会调用模型；确认生成后通过只读工具获取有限源码">ⓘ</span></label>
+<pre id="agent-progress" class="agent-progress" hidden aria-live="polite"></pre>
+<div class="button-row"><button id="cancel-analysis" class="secondary" hidden>取消生成</button><button id="save-architecture" class="secondary" disabled>保存架构图</button><span class="tiny">导入项目不会自动生成</span></div>
+</div>
+</section>
 </main>
-<footer class="statusbar"><span><i class="status-dot"></i><span id="progress" aria-live="polite">就绪</span></span><span>多语言静态索引 <span class="status-separator">/</span> 文件级依赖视图</span><span>RepoLens Preview</span></footer>
-<dialog id="settings-dialog" aria-labelledby="settings-title"><div class="dialog-heading"><div><p class="eyebrow">MODEL CONNECTION</p><h2 id="settings-title">模型设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭模型设置">×</button></div><p class="muted">当前接入 DeepSeek，用于生成项目说明、模块摘要和语义分组。模型名称只在本次分析请求中使用。</p><label for="model">绘图分析模型</label><input id="model" list="model-options" maxlength="100" value="deepseek-chat" autocomplete="off"><datalist id="model-options"><option value="deepseek-chat"><option value="deepseek-reasoner"><option value="deepseek-flash"></datalist><p class="tiny">可填写账户中可用的 DeepSeek 模型；模型只返回结构化模块参数，画布坐标由本地布局器生成。</p><label for="api-key">API Key <span id="key-state" class="pill">未配置</span></label><input id="api-key" type="password" maxlength="1024" autocomplete="off" placeholder="输入 Key，仅发送至 DeepSeek 官方接口"><label class="check"><input id="remember" type="checkbox">保存到 Windows 凭据管理器</label><div class="button-row"><button id="save-key" class="primary">设置 Key</button><button id="delete-key" class="text-button">清除凭据</button></div><div class="privacy"><strong>发送范围与用量</strong><p>仅发送学习目标、相对路径、语言、符号名和静态依赖元数据，不发送源码正文或绝对根路径。请求次数和 token 预算可在 config.toml 中调整。</p></div><p id="settings-feedback" role="status" class="tiny"></p></dialog>
-</body></html>
+<footer class="statusbar"><span><i class="status-dot"></i><span id="progress" aria-live="polite">就绪</span></span><span>多语言静态索引 <span class="status-separator">/</span> 架构与源码</span><span>RepoLens Preview</span></footer>
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+<div class="dialog-heading"><div><p class="eyebrow">MODEL CONNECTION</p><h2 id="settings-title">模型设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭模型设置">×</button></div>
+<p class="muted">当前接入 DeepSeek。Agent 通过只读工具查阅项目，生成带源码入口的架构图。</p>
+<label for="model">绘图分析模型</label><input id="model" list="model-options" maxlength="100" value="deepseek-chat" autocomplete="off"><datalist id="model-options"><option value="deepseek-chat"><option value="deepseek-reasoner"></datalist>
+<p class="tiny">填写账户可用且支持工具调用的模型。模型返回结构化参数，布局和图形由本地生成。</p>
+<label for="api-key">API Key <span id="key-state" class="pill">未配置</span></label><input id="api-key" type="password" maxlength="1024" autocomplete="off" placeholder="输入 Key，仅用于 DeepSeek 官方接口">
+<label class="check"><input id="remember" type="checkbox">保存到 Windows 凭据管理器</label>
+<div class="button-row"><button id="save-key" class="primary">设置 Key</button><button id="delete-key" class="text-button">清除凭据</button></div>
+<div class="privacy"><strong>发送范围与用量</strong><p>确认生成后发送学习目标、项目索引摘要，以及 Agent 按需查阅的有限代码片段和文档。不会自动发送整个仓库或本地绝对根路径。常见凭据字面量会遮盖，仍应选择适合发送给模型的项目。导入与恢复已有图不调用模型。轮数、工具数、token 和超时可在 config.toml 调整。</p></div>
+<p id="settings-feedback" role="status" class="tiny"></p>
+</dialog>
+</body>
+</html>

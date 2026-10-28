@@ -11,6 +11,7 @@ import secrets
 import shutil
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
@@ -29,13 +30,13 @@ from repolens.indexing import (
     scan_repository,
 )
 from repolens.llm import DEFAULT_MODEL, DeepSeekClient, validate_key
-from repolens.persistence import load_graph, save_graph
+from repolens.persistence import decode_graph, encode_graph, load_graph, save_graph, MAX_ARCHITECTURE_BYTES
 from repolens import platform as credentials
 from repolens.platform.dialogs import choose_directory
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-MAX_UPLOAD_REQUEST_BYTES = MAX_BROWSE_BYTES + 8_000_000
+MAX_UPLOAD_REQUEST_BYTES = MAX_BROWSE_BYTES * 2 + 8_000_000
 LOGGER = get_logger()
 
 
@@ -49,7 +50,7 @@ class AppState:
         self.persistence_enabled = bool(repository)
         self.architecture_error = None
         self.architecture_path = None
-        self.upload_root = PROJECT_ROOT / ".repolens" / "uploads"
+        self.upload_root = PROJECT_ROOT / ".repolens" / "uploads" / uuid.uuid4().hex
         self.upload_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.picker_lock = threading.Lock()
@@ -58,6 +59,8 @@ class AppState:
         self.picker_error = None
         self.picker_cancelled = False
         self.phase = "就绪"
+        self.agent_run = None
+        self.agent_guard = threading.Lock()
         self.api_key = None
         self.saved = False
         self.key_error = None
@@ -89,11 +92,14 @@ class AppState:
                           "request_timeout_seconds": config.agent.request_timeout_seconds,
                           "wall_time_seconds": config.agent.wall_time_seconds},
                 "busy": self.lock.locked() or self.picker_pending(), "phase": self.phase,
+                "run": self.run_status(),
                 "repository": self.repository_summary(), "graph": self.graph}
 
     def _set_index(self, index, *, persistent: bool) -> None:
         self.index = index
         self.persistence_enabled = persistent
+        if persistent:
+            self.repository_label = None
         self.architecture_error = None
         self.architecture_path = None
         self.graph = dependency_preview(index)
@@ -106,6 +112,82 @@ class AppState:
                 LOGGER.info("architecture.loaded snapshot=%s", index.snapshot[:12])
             elif issue:
                 LOGGER.info("architecture.unavailable reason=%s", issue[:160])
+
+    def run_status(self, run_id=None) -> dict | None:
+        with self.agent_guard:
+            run = self.agent_run
+            if not run or run_id and run_id != run["id"]:
+                return None
+            return {key: run[key] for key in ("id", "status", "phase", "message", "error", "events")}
+
+    def start_agent(self, body: dict) -> dict:
+        if body.get("confirmed") is not True:
+            raise RepoLensError("请先确认启动 Agent 读取必要代码片段。")
+        if self.index is None or not self.api_key:
+            raise RepoLensError("请先导入仓库并配置 DeepSeek API Key。")
+        goal = body.get("goal", "")
+        if not isinstance(goal, str) or len(goal) > 1000:
+            raise RepoLensError("学习目标最多 1000 字符。")
+        if self.picker_pending() or not self.lock.acquire(blocking=False):
+            raise RepoLensError("当前有任务正在运行。", 409)
+        try:
+            config = get_config().agent
+            client = self.client_factory(self.api_key, model=body.get("model", DEFAULT_MODEL),
+                                         timeout=config.request_timeout_seconds)
+            run = {"id": uuid.uuid4().hex, "status": "running", "phase": "INDEXING", "message": "正在准备分析……",
+                   "error": None, "events": [], "cancel": threading.Event()}
+            with self.agent_guard:
+                self.agent_run = run
+            self.phase = run["message"]
+            worker = threading.Thread(target=self._agent_worker, args=(run, self.index, goal, client, config), daemon=True)
+            worker.start()
+        except Exception:
+            self.lock.release()
+            raise
+        return {"id": run["id"], "status": "running"}
+
+    def _agent_worker(self, run, index, goal, client, config):
+        def event(value):
+            with self.agent_guard:
+                run["phase"] = value["phase"]
+                run["message"] = value["message"]
+                run["events"] = (run["events"] + [value])[-200:]
+                self.phase = value["message"]
+        try:
+            LOGGER.info("agent.start run=%s files=%d", run["id"], len(index.documents))
+            graph = explore(index, goal, client, settings=config, cancelled=run["cancel"].is_set, on_event=event)
+            with self.agent_guard:
+                if run["cancel"].is_set():
+                    raise RepoLensError("已取消生成，原架构图保持不变。", 409)
+                self.graph = graph
+                run["status"] = "complete"
+            LOGGER.info("agent.complete run=%s requests=%d tools=%d tokens=%d", run["id"],
+                        graph["usage"]["requests"], graph["usage"]["tool_calls"], graph["usage"]["total_tokens"])
+        except RepoLensError as exc:
+            with self.agent_guard:
+                run["status"] = "cancelled" if run["cancel"].is_set() else "failed"
+                run["error"] = str(exc)
+            LOGGER.info("agent.stopped run=%s status=%s", run["id"], run["status"])
+        except Exception:
+            with self.agent_guard:
+                run["status"], run["error"] = "failed", "本地分析失败，请查看运行日志后重试。"
+            LOGGER.error("agent.failed run=%s", run["id"])
+        finally:
+            with self.agent_guard:
+                run["phase"] = "IDLE"
+            self.phase = "就绪"
+            self.lock.release()
+
+    def cancel_agent(self, run_id: str) -> dict:
+        with self.agent_guard:
+            run = self.agent_run
+            if not run or run["id"] != run_id:
+                raise RepoLensError("分析任务不存在。", 404)
+            if run["status"] == "running":
+                run["cancel"].set()
+                run["message"] = "正在取消；等待当前请求返回后停止。"
+                self.phase = run["message"]
+        return {"cancel_requested": True}
 
     def picker_pending(self) -> bool:
         return bool(self.picker_thread and self.picker_thread.is_alive())
@@ -202,16 +284,13 @@ class AppState:
         return str(path)
 
     def import_uploaded(self, files: list[dict]) -> tuple[object, dict]:
-        if not files or len(files) > MAX_BROWSE_FILES:
+        if not files or len(files) > MAX_BROWSE_FILES + 1:
             raise RepoLensError(f"请选择不超过 {MAX_BROWSE_FILES} 个可浏览文本文件的目录。")
         total = 0
         root_name = "上传项目"
-        staging = self.upload_root
-        for child in staging.iterdir():
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
+        staging = self.upload_root / uuid.uuid4().hex
+        staging.mkdir()
+        saved_data = None
         try:
             for item in files:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("content"), str):
@@ -224,15 +303,21 @@ class AppState:
                     root_name = root_name if root_name != "上传项目" else parts[0]
                     parts = parts[1:]
                 relative = Path(*parts)
-                if relative.is_absolute() or relative.name == "":
+                if relative.is_absolute() or relative.name == "" or any(":" in part for part in parts):
                     raise RepoLensError("目录包含无效的文件路径。")
                 content = item["content"]
+                if relative.as_posix() == ".repolens/architecture.json":
+                    saved_data = content.encode("utf-8")
+                    if len(saved_data) > MAX_ARCHITECTURE_BYTES:
+                        raise RepoLensError("架构文件超过 4 MB。")
+                    continue
                 encoded_size = len(content.encode("utf-8"))
                 if encoded_size > MAX_BROWSE_FILE_BYTES:
                     raise RepoLensError(f"单个文件不能超过 {MAX_BROWSE_FILE_BYTES // 1_000_000} MB。")
                 if total + encoded_size > MAX_BROWSE_BYTES:
                     raise RepoLensError(f"上传文本总量不能超过 {MAX_BROWSE_BYTES // 1_000_000} MB。")
                 target = staging / relative
+                target.resolve().relative_to(staging.resolve())
                 target.parent.mkdir(parents=True, exist_ok=True)
                 encoded = content.encode("utf-8")
                 for attempt in range(3):
@@ -252,9 +337,14 @@ class AppState:
             raise
         self.repository_label = root_name
         self._set_index(candidate_index, persistent=False)
+        if saved_data is not None:
+            try:
+                self.graph = decode_graph(candidate_index, saved_data)
+            except RepoLensError as exc:
+                self.architecture_error = str(exc)
         LOGGER.info("repository.upload name=%s files=%d bytes=%d edges=%d", root_name,
                     len(candidate_index.documents), total, len(candidate_index.edges))
-        return candidate_index, candidate_graph
+        return candidate_index, self.graph
 
     def cleanup_uploads(self) -> None:
         for child in self.upload_root.iterdir() if self.upload_root.exists() else ():
@@ -274,6 +364,9 @@ class LocalServer(ThreadingHTTPServer):
         self.origin = f"http://127.0.0.1:{self.server_address[1]}"
 
     def server_close(self):
+        run = self.state.run_status()
+        if run and run["status"] == "running":
+            self.state.cancel_agent(run["id"])
         self.state.cleanup_uploads()
         super().server_close()
 
@@ -356,6 +449,34 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/api/state":
             self._json(200, state.summary())
             return
+        if self.command == "GET" and path in {"/api/agent/run", "/api/agent/events"}:
+            run_id = parse_qs(urlsplit(self.path).query).get("id", [""])[0]
+            run = state.run_status(run_id)
+            if not run_id or run is None:
+                raise RepoLensError("分析任务不存在。", 404)
+            if path == "/api/agent/run":
+                self._json(200, run)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            previous = None
+            while run:
+                encoded = json.dumps(run, ensure_ascii=False)
+                if encoded != previous:
+                    self.wfile.write(("data: " + encoded + "\n\n").encode("utf-8"))
+                    previous = encoded
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                if run["status"] != "running":
+                    break
+                time.sleep(.5)
+                run = state.run_status(run_id)
+            return
         if self.command == "GET" and path == "/api/repository/pick/status":
             self._json(200, state.picker_status())
             return
@@ -368,6 +489,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "POST":
             raise RepoLensError("接口不存在。", 404)
         body = self._body(MAX_UPLOAD_REQUEST_BYTES if path == "/api/repository/upload" else 16_384)
+        if path == "/api/agent/cancel":
+            self._json(200, state.cancel_agent(body.get("id", "")))
+            return
+        if path == "/api/agent/analyze":
+            self._json(202, state.start_agent(body))
+            return
         if path == "/api/repository/pick":
             state.begin_picker()
             self._json(202, {"pending": True})
@@ -423,25 +550,12 @@ class Handler(BaseHTTPRequestHandler):
                                                      goal=body.get("goal", ""))
                 self._json(200, {"saved": True, "path": saved_path,
                                  "repository": state.repository_summary(), "graph": state.graph})
-            elif path == "/api/agent/analyze":
-                if body.get("confirmed") is not True:
-                    raise RepoLensError("请先确认启动 Agent 读取必要代码片段。")
-                if state.index is None or not state.api_key:
-                    raise RepoLensError("请先导入仓库并配置 DeepSeek API Key。")
-                agent_config = get_config().agent
-                client = state.client_factory(state.api_key, model=body.get("model", DEFAULT_MODEL),
-                                              timeout=agent_config.request_timeout_seconds)
-                model_name = getattr(client, "model", body.get("model", DEFAULT_MODEL))
-                LOGGER.info("agent.start model=%s goal_chars=%d files=%d",
-                            model_name, len(body.get("goal", "")) if isinstance(body.get("goal", ""), str) else -1,
-                            len(state.index.files))
-                graph = explore(state.index, body.get("goal", ""), client,
-                                lambda message: setattr(state, "phase", message), settings=agent_config)
-                state.graph = graph
-                LOGGER.info("agent.complete model=%s requests=%d tools=%d tokens=%d elapsed_ms=%d",
-                            model_name, graph["usage"]["requests"], graph["usage"]["tool_calls"],
-                            graph["usage"]["total_tokens"], int((time.monotonic() - request_started) * 1000))
-                self._json(200, {"graph": graph, "repository": state.repository_summary()})
+            elif path == "/api/architecture/export":
+                if body.get("confirmed") is not True or not state.index or not state.graph:
+                    raise RepoLensError("请先确认保存当前架构图。")
+                payload = encode_graph(state.index, state.graph, model=body.get("model", DEFAULT_MODEL),
+                                       goal=body.get("goal", ""), usage=state.graph.get("usage"))
+                self._send(200, payload)
             elif path == "/api/analyze":
                 if body.get("confirmed") is not True:
                     raise RepoLensError("请先确认将当前索引摘要发送至 DeepSeek。")

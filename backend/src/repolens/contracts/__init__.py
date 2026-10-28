@@ -256,6 +256,44 @@ def _evidence_refs(value, field: str, evidence_ids: set[str] | frozenset[str] | 
     return list(dict.fromkeys(refs))
 
 
+def validate_evidence(records: dict, index: RepositoryIndex) -> dict:
+    """Validate source fingerprints/ranges; persisted observations are provenance, not proof of model reasoning."""
+    if not isinstance(records, dict) or len(records) > 1000:
+        raise RepoLensError("语义图缺少有效的工具证据记录。")
+    clean = {}
+    for key, record in records.items():
+        if not isinstance(record, dict) or record.get("evidence_id") != key or record.get("snapshot") != index.snapshot:
+            raise RepoLensError("工具证据不属于当前索引。")
+        if not isinstance(record.get("tool"), str) or not isinstance(record.get("anchors"), list):
+            raise RepoLensError("工具证据格式无效。")
+        if len(record["anchors"]) > 500:
+            raise RepoLensError("证据锚点数量超过上限。")
+        anchors = []
+        for anchor in record["anchors"]:
+            if not isinstance(anchor, dict):
+                raise RepoLensError("证据锚点格式无效。")
+            resolved = _resolve_anchor(anchor.get("anchor_id"), index)
+            file = index.documents[resolved["file_id"]]
+            start, end = anchor.get("start_line"), anchor.get("end_line")
+            if (anchor.get("file_id") != file.id or anchor.get("fingerprint") != file.fingerprint or
+                    type(start) is not int or type(end) is not int or not 1 <= start <= end <= file.line_count or
+                    anchor.get("observation") not in {"content", "metadata"}):
+                raise RepoLensError("证据锚点的文件指纹或行范围无效。")
+            anchors.append({name: anchor[name] for name in ("anchor_id", "file_id", "fingerprint", "start_line", "end_line", "observation")})
+        clean[key] = {"evidence_id": key, "tool": record["tool"][:64], "snapshot": index.snapshot,
+                      "anchors": anchors, "truncated": record.get("truncated") is True}
+    return clean
+
+
+def _covered(anchors: list[dict], refs: list[str], records: dict) -> bool:
+    observations = [anchor for ref in refs for anchor in records[ref]["anchors"]
+                    if anchor["observation"] == "content"]
+    return all(any(observation["file_id"] == anchor["file_id"] and
+                   observation["start_line"] <= anchor["end_line"] and
+                   observation["end_line"] >= anchor["start_line"] for observation in observations)
+               for anchor in anchors)
+
+
 def _render_spec(value) -> dict:
     if value is None:
         return {"shape": "module", "accent": "teal", "badge": "", "lane": "", "emphasis": "normal"}
@@ -274,15 +312,15 @@ def _render_spec(value) -> dict:
 
 
 def validate_semantic_graph(raw: dict, index: RepositoryIndex,
-                           evidence_ids: set[str] | frozenset[str] | None = None) -> dict:
+                           evidence_ids: dict | None = None) -> dict:
     """Validate v0.2 semantic graph and derive IDs/anchors locally.
 
-    ``evidence_ids`` is supplied by the Agent run. Passing ``None`` only keeps
-    the helper useful for schema fixtures; production submission should pass
-    the exact evidence set so fabricated references are rejected.
+    Evidence records must come from tools used in the current run or a validated
+    saved file. A reference existing in a list of IDs is insufficient.
     """
     if not isinstance(raw, dict):
         raise RepoLensError("语义图必须是 JSON 对象。")
+    records = validate_evidence(evidence_ids, index)
     required = {"project_type", "summary", "modules", "relations", "incomplete", "incomplete_regions"}
     if set(raw) != required:
         raise RepoLensError("语义图字段不匹配，不能添加或遗漏字段。")
@@ -314,19 +352,21 @@ def validate_semantic_graph(raw: dict, index: RepositoryIndex,
             raise RepoLensError(f"modules[{position}] 至少需要一个真实源码锚点。")
         anchors = [_resolve_anchor(anchor_id, index) for anchor_id in anchors_raw]
         anchor_keys = sorted({(anchor["symbol_id"] if "symbol_id" in anchor else anchor["file_id"]) for anchor in anchors})
-        module_id = "module_" + hashlib.sha256((index.snapshot + "|" + "|".join(anchor_keys)).encode("utf-8")).hexdigest()[:16]
+        module_id = "module_" + hashlib.sha256(("anchors-v1|" + "|".join(anchor_keys)).encode("utf-8")).hexdigest()[:16]
         if module_id in used_ids:
             raise RepoLensError("多个模块由完全相同的源码锚点组成，无法生成稳定 ID。")
         used_ids.add(module_id)
         module_ids[key] = module_id
         evidence_refs = _evidence_refs(item["evidence_refs"], f"modules[{position}].evidence_refs", evidence_ids)
+        if not _covered(anchors, evidence_refs, records):
+            raise RepoLensError(f"模块 {key} 的证据未覆盖所引用源码，请先读取对应文件或符号。")
         primary = anchors[0]
         modules.append({"id": module_id, "module_key": key, "name": _text(item["label"], f"modules[{position}].label", 120),
                         "kind": kind, "summary": _text(item["summary"], f"modules[{position}].summary", 280),
                         "group": _text(item["group"], f"modules[{position}].group", 80), "anchors": anchors,
                         "anchor_id": primary.get("symbol_id", primary["file_id"]),
                         "path": primary["path"], "start_line": primary["start_line"], "end_line": primary["end_line"],
-                        "entry": False, "evidence_refs": evidence_refs,
+                        "entry": False, "evidence_refs": evidence_refs, "runtime_metrics": {},
                         "confidence": _confidence(item["confidence"], f"modules[{position}].confidence"),
                         "render_spec": _render_spec(item.get("render_spec"))})
     if not modules:
@@ -350,6 +390,17 @@ def validate_semantic_graph(raw: dict, index: RepositoryIndex,
         evidence_refs = _evidence_refs(item["evidence_refs"], f"relations[{position}].evidence_refs", evidence_ids)
         source = module_ids[source_key]
         target = module_ids[target_key]
+        source_node = next(node for node in modules if node["id"] == source)
+        target_node = next(node for node in modules if node["id"] == target)
+        relation_anchors = source_node["anchors"] + target_node["anchors"]
+        if not _covered(relation_anchors, evidence_refs, records):
+            raise RepoLensError(f"关系 {source_key} → {target_key} 的证据必须覆盖两端源码。")
+        static = relation_type == "imports"
+        if static and not any((a["file_id"], b["file_id"]) in index.edges
+                              for a in source_node["anchors"] for b in target_node["anchors"]):
+            raise RepoLensError("imports 关系缺少静态依赖证据。")
+        if not static and _confidence(item["confidence"], f"relations[{position}].confidence") > .85:
+            raise RepoLensError("语义推断关系置信度不能超过 0.85。")
         edge_id = "edge_" + hashlib.sha256((source + "|" + target + "|" + relation_type).encode("utf-8")).hexdigest()[:16]
         if edge_id in edge_ids:
             raise RepoLensError("语义图中存在重复关系。")
@@ -357,15 +408,23 @@ def validate_semantic_graph(raw: dict, index: RepositoryIndex,
         relations.append({"id": edge_id, "source": source, "target": target, "type": relation_type,
                           "label": _text(item["label"], f"relations[{position}].label", 120),
                           "confidence": _confidence(item["confidence"], f"relations[{position}].confidence"),
-                          "evidence_refs": evidence_refs})
+                          "evidence_refs": evidence_refs, "basis": "static" if static else "inferred"})
     return {"schema_version": "0.2", "snapshot": index.snapshot, "project_type": project_type,
             "summary": summary, "nodes": modules, "edges": relations,
             "incomplete": raw["incomplete"] or bool(index.warnings),
             "incomplete_regions": list(dict.fromkeys(regions + index.warnings)),
-            "warnings": list(index.warnings), "mode": "deepseek-agent"}
+            "warnings": list(index.warnings), "mode": "deepseek-agent", "evidence": records}
 
 
 def dependency_preview(index: RepositoryIndex) -> dict:
+    if not index.files:
+        return {"schema_version": "0.1", "snapshot": index.snapshot, "project_type": "文本项目 · 本地预览",
+                "summary": "当前语言没有静态解析器；可本地浏览源码，也可确认后由模型通过文本工具理解。",
+                "nodes": [{"id": file.id, "name": file.path.rsplit("/", 1)[-1], "path": file.path,
+                           "start_line": 1, "end_line": file.line_count, "summary": "可通过只读文本工具探索。",
+                           "group": file.path.rpartition("/")[0] or "根目录", "entry": False}
+                          for file in list(index.documents.values())[:500]],
+                "edges": [], "incomplete": True, "warnings": list(index.warnings)}
     return validate_graph({
         "project_type": "多语言 · 本地依赖预览",
         "summary": "由本地静态索引生成，尚未调用 DeepSeek。边只表示可解析的源码依赖，不代表运行时调用。",

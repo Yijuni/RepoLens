@@ -6,4 +6,6 @@
 
 API Key 不属于配置文件，仍通过网页设置并使用 Windows 凭据管理器保存。
 
+默认 Agent 最多 20 轮、40 次工具调用、两次提交修正、累计 128,000 token、单次输出 8192 token、上下文 80,000 字符、单次网络 60 秒、总时限 180 秒。工具流程至少需要 4 轮；末尾预留提交/修正机会。实际请求数可远小于上限，失败或取消不会覆盖旧图。
+
 验证：复制 `config.example.toml` 为 `config.toml`，修改 `server.log_dir` 或 `limits.browse_files` 后重启服务，查看启动输出和 `/api/state` 返回的 `limits`。配置读取不执行任何仓库代码。

@@ -1,9 +1,9 @@
-# 模型指令
+# 版本化模型指令
 
-集中维护版本化指令。v1/graph.md 定义基于真实 ID 与 import 证据的 JSON 输出；v1/repair.md 负责最后一次结构修正。
+v2/agent.md 定义规划、按需探索与最终 submit_graph，明确预算、来源、语义推断和不执行代码的规则。工具及图 schema 来自代码；系统指令、用户目标、仓库数据和工具消息分别传递。
 
-分析模块加载 UTF-8 文件。系统指令与用户目标、仓库元数据分开；输出 schema 从 contracts 自动生成，不在 prompt 中手写第二套字段。
+v1/graph.md、repair.md 用于兼容旧文件级分析；v1/agent.md、agent_repair.md 保留为原型版本记录，当前 Agent 不再加载。
 
-名称等仓库内容视为数据。Prompt 约束不能替代代码中的证据校验。行为变化应保留版本来源，必要时新建版本。
+仓库内容始终视为待分析数据。Prompt 不能替代后端来源与路径校验。当前不支持从目标仓库覆盖系统指令。
 
-验证：AnalysisTests 覆盖加载、结果校验和修正路径，运行方式见 [服务说明](../../../../README.md)。当前未提供配置覆盖或完整探索指令。
+验证：AnalysisTests 检查旧流程，WorkflowTests 检查 v2 阶段、工具和提交行为。命令见根 README。

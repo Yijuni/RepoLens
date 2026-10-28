@@ -1,25 +1,26 @@
 # 本地服务
 
-组合索引、模型、凭据与网页。基于 ThreadingHTTPServer，只监听 127.0.0.1，默认随机端口。
+ThreadingHTTPServer 组合索引、Agent、凭据与网页，只监听 127.0.0.1，默认随机端口。
 
-| 接口 | 作用 |
+| 接口 | 用途 |
 | --- | --- |
-| GET / | 网页与本地会话 Cookie |
-| GET /api/state | 索引、图、进度和凭据是否配置，不含 Key |
-| GET /api/source?id= | 按索引 ID 查看经核对的源码 |
-| POST /api/repository | 通过 path 导入代码目录 |
-| POST /api/repository/upload | 接收浏览器目录选择的文本快照，写入本机临时目录后索引 |
-| POST /api/repository/pick | 启动异步 Windows 目录选择；立即返回 pending |
-| GET /api/repository/pick/status | 领取选择结果、取消或错误 |
-| POST /api/example | 载入示例 |
-| POST /api/key | 通过 api_key 和 remember 设置凭据 |
-| POST /api/key/delete | 清除凭据 |
-| POST /api/analyze | 通过 goal、model、confirmed 请求分析 |
-| POST /api/agent/analyze | 用户确认后启动 DeepSeek 只读工具探索和语义图提交 |
-| POST /api/architecture/save | 用户确认后保存已校验语义图到目标仓库 `.repolens/architecture.json` |
+| GET /、/api/state | 页面/会话 Cookie、当前仓库与图、凭据配置状态 |
+| GET /api/source?id= | 校验指纹后按文件或符号 ID 读取源码 |
+| POST /api/repository、/api/example | 路径导入/示例，不请求模型 |
+| POST /api/repository/upload | 浏览器文本快照，隔离暂存并在成功后切换 |
+| POST /api/repository/pick | 启动 Windows 目录选择 |
+| GET /api/repository/pick/status | 选择结果、取消或错误 |
+| POST /api/key、/api/key/delete | 设置或清除凭据，不回显 Key |
+| POST /api/agent/analyze | confirmed=true 才创建任务，202 返回 id |
+| GET /api/agent/run?id= | 小型任务状态，不重复传整图 |
+| GET /api/agent/events?id= | SSE 阶段事件，终态关闭连接 |
+| POST /api/agent/cancel | 按 id 请求取消，等待当前请求返回 |
+| POST /api/architecture/save | 明确保存服务持有的已校验图 |
+| POST /api/architecture/export | 输出同格式架构文件，供目录句柄保存/下载 |
+| POST /api/analyze | 兼容早期文件级 JSON 分析 |
 
-接口要求 HttpOnly、SameSite=Strict 会话 Cookie，检查 Host、Origin 和 Fetch-Site，拒绝跨来源访问。普通 POST 最多 16 KB；浏览器目录上传使用与配置浏览上限匹配的较大 JSON 请求体。页面采用 CSP。
+所有 API 检查会话、Host、Origin 和 Fetch-Site。普通请求上限 16 KB，上传上限按浏览配置计算。只允许一个导入/分析任务，忙时 409；取消接口在忙时仍可用。
 
-任务串行执行，忙时返回 409；导入不会自动调用模型。用户明确确认后 `/api/agent/analyze` 才会调用只读工具循环。浏览器上传快照不能持久保存；通过本地路径导入的项目可以明确保存已校验图，重新导入时按 snapshot 尝试恢复。索引支持 Python、C/C++、Go、Java、JavaScript/TypeScript、Rust 的静态依赖线索；无持久索引、SSE 或取消接口，仅供本地单用户使用。
+AppState 管理运行快照；后台 Agent 仅成功后替换图，失败或取消保留旧图。浏览器上传使用独立会话目录，失败不破坏之前源码；服务关闭清理自己的临时快照。
 
-验证：ServerTests 使用真实 loopback HTTP 和模拟模型检查会话、同源、发送确认、源码及分析闭环。命令见 [服务说明](../../../../README.md)。
+验证：ServerTests、JobTests 使用实际 loopback HTTP 和模拟客户端检查确认、SSE、取消、来源保护和保存恢复。命令见根 README。限制：本地单用户、内存索引和任务，服务重启不保留未保存图或生成任务。

@@ -1,9 +1,11 @@
-# Agent 探索
+# Agent
 
-`explore(index, goal, client)` 实现用户确认后的有限 DeepSeek 工具探索：模型先接收索引摘要、工具 schema 和语义 IR schema，再通过注册的只读工具获取代码证据，最后提交经 `validate_semantic_graph` 校验的语义架构图。
+`explore(index, goal, client, ..., cancelled, on_event)` 返回通过校验的语义图；只在用户确认生成后调用。
 
-入口不会在导入或启动时自动执行。轮数、工具调用数、读取行数、token、上下文和墙钟时间均由 `[agent]` 配置限制；工具失败、证据不足、预算耗尽或最终 IR 无效时不返回半成品图。当前只读工具不执行目标代码，也不支持任意模型生成脚本。
+状态顺序为 INDEXING → PLANNING → EXPLORING → SUBMITTING → RENDERING → IDLE。规划仅开放 `submit_plan`；探索使用显式注册的只读工具；最终通过 `submit_graph` 提交。非法参数和证据错误以工具结果反馈，提交修正受独立上限约束。
 
-验证：AgentTests 使用模拟 tool-call 客户端检查工具结果进入上下文、证据引用校验、预算和旧图保护。真实 DeepSeek 联调需要用户在网页设置 Key 后显式点击生成。
+初始输入只有目标、语言/目录统计和少量文档入口。源码由工具按需读取。旧工具正文可从上下文移除，保留证据元数据；需要时重新读取。轮数、工具数、上下文、token、网络超时和总时限受统一配置限制，末尾预留提交轮次。不能通过校验时不返回半成品。
 
-服务入口：`POST /api/agent/analyze`。导入项目不会自动触发；浏览器工作台在发送前要求用户勾选范围并再次确认。当前状态仍使用轮询 `/api/state` 显示阶段，后续再迁移到 SSE。
+`on_event` 接收阶段、可读消息、轮次与工具名。日志只包含事件元数据。取消在调用前后及工具之间检查；进行中的 HTTP 请求等待返回或超时。
+
+验证：运行后端 unittest；WorkflowTests 检查规划、多轮探索、工具错误反馈、提交修正、取消与预算。真实效果需通过网页配置 Key 后显式测试。

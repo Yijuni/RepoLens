@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from repolens.analysis import analyze
 from repolens.agent import explore
-from repolens.config import load_config
+from repolens.config import AgentConfig, load_config
 from repolens.contracts import dependency_preview, schema_for, semantic_schema_for, validate_graph, validate_semantic_graph
 from repolens.errors import RepoLensError
 from repolens.indexing import scan_repository
@@ -230,9 +230,18 @@ class ContractTests(RepositoryCase):
             "incomplete": False, "incomplete_regions": [],
         }
 
+    def records(self):
+        registry = build_default_registry(self.index)
+        records = {}
+        for key, file in zip(("ev_entry", "ev_service"), self.index.files.values()):
+            record = registry.invoke("read_range", {"file_id": file.id, "start_line": 1, "end_line": 1})["evidence"]
+            records[key] = record | {"evidence_id": key}
+        records["ev_relation"] = records["ev_entry"] | {"evidence_id": "ev_relation", "anchors": records["ev_entry"]["anchors"] + records["ev_service"]["anchors"]}
+        return records
+
     def test_semantic_graph_derives_ids_and_real_anchors(self):
         graph = validate_semantic_graph(self.semantic_draft(), self.index,
-                                        {"ev_entry", "ev_service", "ev_relation"})
+                                        self.records())
         self.assertEqual(graph["schema_version"], "0.2")
         self.assertTrue(graph["nodes"][0]["id"].startswith("module_"))
         self.assertEqual(graph["nodes"][0]["anchors"][0]["path"], "main.py")
@@ -243,11 +252,11 @@ class ContractTests(RepositoryCase):
         raw = self.semantic_draft()
         raw["modules"][0]["anchor_ids"] = ["symbol_invented"]
         with self.assertRaises(RepoLensError):
-            validate_semantic_graph(raw, self.index, {"ev_entry", "ev_service", "ev_relation"})
+            validate_semantic_graph(raw, self.index, self.records())
         raw = self.semantic_draft()
         raw["modules"][0]["evidence_refs"] = ["ev_missing"]
         with self.assertRaises(RepoLensError):
-            validate_semantic_graph(raw, self.index, {"ev_entry", "ev_service", "ev_relation"})
+            validate_semantic_graph(raw, self.index, self.records())
 
     def test_semantic_schema_is_strict_and_has_relation_types(self):
         schema = semantic_schema_for()
@@ -279,14 +288,14 @@ class ToolTests(RepositoryCase):
 class PersistenceTests(RepositoryCase):
     def _graph(self):
         registry = build_default_registry(self.index)
-        evidence = registry.invoke("entry_candidates", {})["evidence"]["evidence_id"]
         file = next(iter(self.index.files.values()))
+        evidence = registry.invoke("read_range", {"file_id": file.id, "start_line": 1, "end_line": 1})["evidence"]["evidence_id"]
         return validate_semantic_graph({
             "project_type": "Python", "summary": "持久化测试。",
             "modules": [{"module_key": "entry", "label": "入口", "kind": "module", "summary": "入口模块。", "group": "核心",
                          "anchor_ids": [file.id], "evidence_refs": [evidence], "confidence": .8}],
             "relations": [], "incomplete": False, "incomplete_regions": [],
-        }, self.index, {evidence}) | {"usage": {"requests": 1, "tool_calls": 1, "total_tokens": 2}, "mode": "deepseek-agent"}
+        }, self.index, registry.evidence) | {"usage": {"requests": 1, "tool_calls": 1, "total_tokens": 2}, "mode": "deepseek-agent"}
 
     def test_explicit_save_and_load_roundtrip(self):
         graph = self._graph()
@@ -297,7 +306,8 @@ class PersistenceTests(RepositoryCase):
             self.assertIsNone(issue)
             self.assertEqual(loaded["schema_version"], "0.2")
             self.assertEqual(loaded["mode"], "saved-agent")
-            self.assertNotIn("content", json.dumps(json.loads(path.read_text(encoding="utf-8"))))
+            self.assertNotIn("DO_NOT_SEND_BODY", path.read_text(encoding="utf-8"))
+            self.assertNotIn('"content":', path.read_text(encoding="utf-8"))
         finally:
             shutil.rmtree(path.parent, ignore_errors=True)
 
@@ -332,16 +342,20 @@ class AgentStubClient:
         self.requests.append(copy.deepcopy(messages))
         self.calls += 1
         if self.calls == 1:
-            return Completion("", 100, tool_calls=({"id": "call_1", "name": "entry_candidates", "arguments": "{}"},))
-        return Completion(self.final_output, 100)
+            name, args = "submit_plan", {"steps": ["读取入口并提交图"]}
+        elif self.calls == 2:
+            name, args = "read_range", {"file_id": json.loads(self.final_output)["modules"][0]["anchor_ids"][0], "start_line": 1, "end_line": 1}
+        else:
+            name, args = "submit_graph", json.loads(self.final_output)
+        return Completion("", 100, tool_calls=({"id": "call_" + str(self.calls), "name": name, "arguments": json.dumps(args)},))
 
 
 class AgentTests(RepositoryCase):
     def test_tool_exploration_submits_valid_semantic_graph(self):
         from repolens.tools import build_default_registry
         registry = build_default_registry(self.index)
-        evidence = registry.invoke("entry_candidates", {})["evidence"]["evidence_id"]
         files = list(self.index.files.values())
+        evidence = registry.invoke("read_range", {"file_id": files[0].id, "start_line": 1, "end_line": 1})["evidence"]["evidence_id"]
         raw = {
             "project_type": "Python 服务", "summary": "通过入口调用服务。",
             "modules": [
@@ -354,7 +368,7 @@ class AgentTests(RepositoryCase):
         result = explore(self.index, "理解入口", client, registry=registry)
         self.assertEqual(result["schema_version"], "0.2")
         self.assertEqual(result["usage"]["tool_calls"], 1)
-        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(len(client.requests), 3)
         self.assertTrue(any(item["role"] == "tool" for item in client.requests[-1]))
 
     def test_agent_rejects_graph_without_obtained_evidence(self):
@@ -380,20 +394,20 @@ class AnalysisTests(RepositoryCase):
 
     def test_one_bounded_repair(self):
         client = StubClient(["not json", json.dumps(self.draft())])
-        self.assertEqual(analyze(self.index, "", client)["usage"]["requests"], 2)
+        self.assertEqual(analyze(self.index, "", client, settings=AgentConfig(max_rounds=2))["usage"]["requests"], 2)
         self.assertIn("校验错误", client.requests[-1][-1]["content"])
 
     def test_repair_exhaustion(self):
         client = StubClient(["{}", "{}"])
         with self.assertRaisesRegex(RepoLensError, "两次"):
-            analyze(self.index, "", client)
+            analyze(self.index, "", client, settings=AgentConfig(max_rounds=2))
         self.assertEqual(len(client.requests), 2)
 
     def test_stale_index_fails_before_network(self):
         (self.root / "main.py").write_text("pass", encoding="utf-8")
         client = StubClient([])
         with self.assertRaises(RepoLensError):
-            analyze(self.index, "", client)
+            analyze(self.index, "", client, settings=AgentConfig(max_rounds=2))
         self.assertEqual(client.requests, [])
 
 

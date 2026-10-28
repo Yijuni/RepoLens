@@ -74,14 +74,18 @@ class DeepSeekClient:
             estimated = type(tokens) is not int or tokens < 0
             if estimated:
                 # UTF-8 byte count is intentionally conservative, not a claimed tokenizer.
-                tokens = len(payload) + len(content.encode("utf-8"))
+                tokens = len(payload) + len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
             calls = []
             for call in message.get("tool_calls", ()) or ():
                 function = call.get("function") or {}
                 name = function.get("name")
                 arguments = function.get("arguments", "{}")
-                if isinstance(name, str) and isinstance(arguments, str):
+                if isinstance(name, str) and isinstance(arguments, str) and isinstance(call.get("id"), str) and call["id"]:
                     calls.append({"id": call.get("id", ""), "name": name, "arguments": arguments})
+                else:
+                    raise ValueError("invalid tool call")
+            if len({call["id"] for call in calls}) != len(calls):
+                raise ValueError("duplicate tool id")
             return Completion(content, tokens, estimated, tuple(calls))
         except error.HTTPError as exc:
             messages_by_status = {
