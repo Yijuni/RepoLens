@@ -55,7 +55,7 @@
 <label for="api-key">API Key <span id="key-state" class="pill">未配置</span></label><input id="api-key" type="password" maxlength="1024" autocomplete="off" placeholder="输入 Key，仅用于 DeepSeek 官方接口">
 <label class="check"><input id="remember" type="checkbox">保存到 Windows 凭据管理器</label>
 <div class="button-row"><button id="save-key" class="primary">设置 Key</button><button id="delete-key" class="text-button">清除凭据</button></div>
-<div class="privacy"><strong>发送范围与用量</strong><p>确认生成后发送学习目标、项目索引摘要，以及 Agent 按需查阅的有限代码片段和文档。不会自动发送整个仓库或本地绝对根路径。常见凭据字面量会遮盖，仍应选择适合发送给模型的项目。导入与恢复已有图不调用模型。轮数、工具数、token 和超时可在 config.toml 调整。</p></div>
+<div class="privacy"><strong>发送范围与用量</strong><p>确认生成后发送学习目标、项目索引摘要，以及 Agent 按需查阅的有限代码片段和文档。不会自动发送整个仓库或本地绝对根路径。常见凭据字面量会遮盖，仍应选择适合发送给模型的项目。导入与恢复已有图不调用模型。模型自行选择工具和提交时机；页面显示累计 token 与工具调用次数。</p></div>
 <p id="settings-feedback" role="status" class="tiny"></p>
 </dialog>
 </body>

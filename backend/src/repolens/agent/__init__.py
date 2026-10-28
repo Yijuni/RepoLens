@@ -77,9 +77,14 @@ def explore(index: RepositoryIndex, goal: str, client: AgentClient,
     if not isinstance(goal, str) or len(goal) > 1_000:
         raise RepoLensError("学习目标最多 1000 字符。")
     if settings.max_rounds < 4:
-        raise RepoLensError("工具探索至少需要 4 轮预算，请提高 agent.max_rounds 后重启。")
+        raise RepoLensError("工具探索至少需要 4 轮，请提高 agent.max_rounds 后重启。")
     started = time.monotonic()
     deadline = started + settings.wall_time_seconds
+    total_tokens = tool_calls = repairs = requests = 0
+    estimated = False
+    def usage():
+        return {"total_tokens": total_tokens, "estimated": estimated, "requests": requests,
+                "tool_calls": tool_calls, "elapsed_seconds": round(time.monotonic() - started, 2)}
     def check():
         if cancelled():
             raise RepoLensError("已取消生成，原架构图保持不变。", 409)
@@ -90,9 +95,10 @@ def explore(index: RepositoryIndex, goal: str, client: AgentClient,
         nonlocal phase
         phase = stage
         progress(message)
-        on_event({"phase": stage, "message": message, **details})
-        LOGGER.info("agent.event phase=%s round=%s tool=%s status=%s", stage,
-                    details.get("round", "-"), details.get("tool", "-"), details.get("status", "-"))
+        on_event({"phase": stage, "message": message, "usage": usage(), **details})
+        LOGGER.info("agent.event phase=%s round=%s tool=%s status=%s requests=%d tools=%d tokens=%d estimated=%s", stage,
+                    details.get("round", "-"), details.get("tool", "-"), details.get("status", "-"),
+                    requests, tool_calls, total_tokens, estimated)
     emit("INDEXING", "正在核对当前源码快照……")
     check()
     index.assert_current()
@@ -107,35 +113,22 @@ def explore(index: RepositoryIndex, goal: str, client: AgentClient,
     messages = [{"role": "system", "content": (PROMPTS / "agent.md").read_text(encoding="utf-8")},
                 {"role": "user", "content": _json({"goal": goal.strip() or "理解项目整体架构",
                  "repository": _repository_map(index), "limits": {"rounds": settings.max_rounds,
-                 "tools": settings.max_tool_calls, "read_lines": settings.max_read_lines}})}]
-    total_tokens = tool_calls = repairs = requests = 0
-    estimated = False
+                 "read_lines": settings.max_read_lines}})}]
     planned = False
     emit("PLANNING", "Agent 正在规划需要查阅的文档与代码……")
     for round_number in range(1, settings.max_rounds + 1):
         check()
-        force_submit = planned and (round_number >= settings.max_rounds - 1 or tool_calls >= settings.max_tool_calls or
-                                    deadline - time.monotonic() < settings.request_timeout_seconds or
-                                    total_tokens > settings.token_budget * .7)
-        if force_submit:
-            emit("SUBMITTING", "探索预算即将用完，请模型提交已有证据支持的结果……", round=round_number)
-            messages.append({"role": "user", "content": "探索预算结束。请立即调用 submit_graph；未确认区域标记 incomplete，不得编造。"})
-        tools = [plan_tool] if not planned else ([graph_tool] if force_submit else exploration_tools + [graph_tool])
+        tools = [plan_tool] if not planned else exploration_tools + [graph_tool]
         _compact(messages, settings.context_chars)
-        input_bound = len(_json({"messages": messages, "tools": tools}).encode("utf-8")) + 512
-        available = settings.token_budget - total_tokens - input_bound
-        if available < 512:
-            raise RepoLensError("Agent token 预算不足以提交有效图，原架构图保持不变。", 408)
         if hasattr(client, "timeout"):
             client.timeout = max(.1, min(settings.request_timeout_seconds, deadline - time.monotonic()))
-        emit(phase, f"Agent 第 {round_number}/{settings.max_rounds} 轮……", round=round_number)
-        completion = client.complete(messages, min(settings.max_output_tokens, available), tools=tools)
         requests += 1
-        check()
+        emit(phase, f"Agent 第 {round_number}/{settings.max_rounds} 轮，正在等待模型回复……", round=round_number, status="request")
+        completion = client.complete(messages, settings.max_output_tokens, tools=tools)
         total_tokens += completion.tokens
         estimated = estimated or completion.estimated
-        if total_tokens > settings.token_budget:
-            raise RepoLensError("Agent 用量达到预算，原架构图保持不变。", 408)
+        emit(phase, f"第 {round_number} 轮模型已回复，正在处理下一步。", round=round_number, status="response")
+        check()
         calls = list(getattr(completion, "tool_calls", ()) or ())
         if not calls or len(calls) > 32:
             repairs += 1
@@ -169,8 +162,6 @@ def explore(index: RepositoryIndex, goal: str, client: AgentClient,
                     submitted = validate_semantic_graph(arguments, index, dict(registry.evidence))
                     result = {"accepted": True}
                 else:
-                    if tool_calls >= settings.max_tool_calls:
-                        raise RepoLensError("工具预算已用完，请提交已有证据支持的部分图。")
                     tool_calls += 1
                     emit("EXPLORING", f"正在查阅项目：{name}……", tool=name, round=round_number)
                     result = registry.invoke(name, arguments)
@@ -190,9 +181,7 @@ def explore(index: RepositoryIndex, goal: str, client: AgentClient,
             check()
             index.assert_current()
             emit("RENDERING", "证据校验完成，正在准备架构图。")
-            submitted["usage"] = {"total_tokens": total_tokens, "estimated": estimated, "requests": requests,
-                                  "tool_calls": tool_calls, "budget": settings.token_budget,
-                                  "elapsed_seconds": round(time.monotonic() - started, 2)}
+            submitted["usage"] = usage()
             emit("IDLE", "生成完成。")
             return submitted
     raise RepoLensError("Agent 达到轮数上限，未能提交通过校验的架构图；原图保持不变。", 408)

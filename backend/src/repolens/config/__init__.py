@@ -27,9 +27,7 @@ class LimitsConfig:
 class AgentConfig:
     max_rounds: int = 20
     max_repairs: int = 2
-    max_tool_calls: int = 40
     max_read_lines: int = 200
-    token_budget: int = 128_000
     max_output_tokens: int = 8_192
     context_chars: int = 80_000
     request_timeout_seconds: int = 60
@@ -113,12 +111,13 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     )
 
     agent = _section(raw, "agent")
+    for retired in ("token_budget", "max_tool_calls"):
+        if retired in agent:
+            warnings.append(f"agent.{retired} 已停用，累计 token 与工具调用次数仅统计，不作为停止条件。")
     agent_config = AgentConfig(
         max_rounds=_integer(agent, "max_rounds", 20, 1, 100, warnings, "agent.max_rounds"),
         max_repairs=_integer(agent, "max_repairs", 2, 0, 5, warnings, "agent.max_repairs"),
-        max_tool_calls=_integer(agent, "max_tool_calls", 40, 1, 1_000, warnings, "agent.max_tool_calls"),
         max_read_lines=_integer(agent, "max_read_lines", 200, 20, 1_000, warnings, "agent.max_read_lines"),
-        token_budget=_integer(agent, "token_budget", 128_000, 512, 1_000_000, warnings, "agent.token_budget"),
         max_output_tokens=_integer(agent, "max_output_tokens", 8_192, 256, 32_000, warnings, "agent.max_output_tokens"),
         context_chars=_integer(agent, "context_chars", 80_000, 1_000, 500_000, warnings, "agent.context_chars"),
         request_timeout_seconds=_integer(agent, "request_timeout_seconds", 60, 5, 600, warnings, "agent.request_timeout_seconds"),

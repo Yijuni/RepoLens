@@ -55,9 +55,11 @@ Chrome/Edge 的目录访问 API 可在获得写入权限后保存回所选目录
 
 ## 配置和数据
 
-复制 `config.example.toml` 为 `config.toml`，修改后重启。可配置日志、浏览/静态分析文件数、Agent 轮数、工具数、读取行数、token、修正次数与超时。Key 不属于配置文件。
+复制 `config.example.toml` 为 `config.toml`，修改后重启。可配置日志、浏览/静态分析文件数、Agent 轮数、读取行数、单次输出长度、上下文、修正次数与超时。Key 不属于配置文件。
 
-默认预算：20 轮模型请求、40 次工具调用、最多两次提交修正、累计 128,000 token、单次读取 200 行、总时限 180 秒。达到预算时尝试提交有证据的部分图；无法合法提交则保留原图。取消会等待当前网络调用返回或超时，不会启动下一轮。
+Agent 由模型决定继续调用工具还是提交架构图，累计 token 和工具调用次数只统计，不设配额，也不用于强制提前提交。页面和日志按轮更新用量；接口未提供用量时明确标注估算，统计不代表账户余额或账单金额。
+
+默认执行上限为 20 轮模型请求、最多两次提交修正、单次读取 200 行、单次输出 8192 token、上下文 80,000 字符、总时限 180 秒。轮数、超时等用于终止未完成的运行；失败保留原图并显示原因。取消会等待当前网络调用返回或超时，不会启动下一轮。旧配置中的 `token_budget` 和 `max_tool_calls` 已停用，读取时会提示忽略。
 
 确认生成后，DeepSeek 会接收目标、索引摘要以及工具按需返回的有限源码与文档；不自动上传整个仓库。工具遮盖常见凭据字面量，这不能替代用户选择合适的项目和内容。保存文件包含图、来源锚点/指纹及生成信息，不包含工具读取的源码正文或 Key。
 
@@ -71,7 +73,7 @@ Key 只留在服务内存，或按选择保存到 Windows 凭据管理器；页�
 | --- | --- |
 | [indexing](backend/src/repolens/indexing/README.md) | 多语言索引、文件与符号锚点 |
 | [tools](backend/src/repolens/tools/README.md) | 只读工具注册、参数校验与证据 |
-| [agent](backend/src/repolens/agent/README.md) | 规划、工具探索、预算与提交 |
+| [agent](backend/src/repolens/agent/README.md) | 规划、工具探索、用量监测与提交 |
 | [contracts](backend/src/repolens/contracts/README.md) | 语义图 schema 与来源校验 |
 | [persistence](backend/src/repolens/persistence/README.md) | 架构文件保存与恢复 |
 | [llm](backend/src/repolens/llm/README.md) | DeepSeek 传输适配 |

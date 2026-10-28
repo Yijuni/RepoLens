@@ -22,9 +22,9 @@ analysis_bytes = 8000000
 # Agent 最多使用 max_rounds 次模型请求（含工具探索和修正请求）。
 max_rounds = 20
 max_repairs = 2
-max_tool_calls = 40
 max_read_lines = 200
-token_budget = 128000
+# 累计 token 和工具调用次数仅统计，不设配额；由模型决定继续探索或提交图。
+# 单次回复长度与上下文长度是独立的技术限制。
 max_output_tokens = 8192
 context_chars = 80000
 request_timeout_seconds = 60

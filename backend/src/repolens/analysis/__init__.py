@@ -15,7 +15,6 @@ PROMPTS = Path(__file__).resolve().parent.parent / "prompts" / "v1"
 _DEFAULT_AGENT = get_config().agent
 # Compatibility aliases for callers that imported the prototype constants.
 MAX_REQUESTS = min(2, _DEFAULT_AGENT.max_rounds)
-TOKEN_BUDGET = _DEFAULT_AGENT.token_budget
 MAX_OUTPUT = _DEFAULT_AGENT.max_output_tokens
 
 
@@ -35,24 +34,17 @@ def analyze(index: RepositoryIndex, goal: str, client: ModelClient,
                "output_schema": schema_for()}
     context_json = json.dumps(context, ensure_ascii=False)
     if len(context_json) > settings.context_chars:
-        raise RepoLensError("索引摘要超出首版预算，请选择较小的子目录再分析。")
+        raise RepoLensError("索引摘要超出上下文长度上限，请选择较小的子目录再分析。")
     messages = [{"role": "system", "content": (PROMPTS / "graph.md").read_text(encoding="utf-8")},
                 {"role": "user", "content": context_json}]
     total_tokens = 0
     estimated = False
     for attempt in range(settings.max_rounds):
-        input_bound = len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 512
-        available = settings.token_budget - total_tokens - input_bound
-        if available < 512:
-            raise RepoLensError("已达到本次分析预算，请缩小范围后重试。")
-        output_limit = min(settings.max_output_tokens, available)
         progress("正在请求 DeepSeek 理解模块职责……" if attempt == 0
                  else f"正在修正图结构（第 {attempt + 1}/{settings.max_rounds} 次）……")
-        completion = client.complete(messages, output_limit)
+        completion = client.complete(messages, settings.max_output_tokens)
         total_tokens += completion.tokens
         estimated = estimated or completion.estimated
-        if total_tokens > settings.token_budget:
-            raise RepoLensError("模型报告的用量超出本次预算，已停止后续请求。", 502)
         progress("正在核对节点与依赖证据……")
         try:
             raw = json.loads(completion.content)
@@ -67,7 +59,7 @@ def analyze(index: RepositoryIndex, goal: str, client: ModelClient,
             continue
         index.assert_current()
         graph["usage"] = {"total_tokens": total_tokens, "estimated": estimated,
-                          "requests": attempt + 1, "budget": settings.token_budget}
+                          "requests": attempt + 1}
         graph["mode"] = "deepseek"
         return graph
     raise AssertionError("unreachable")

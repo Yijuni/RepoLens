@@ -39,6 +39,15 @@ function keyState(configured, saved) {
   $('key-state').textContent = configured ? (saved ? '已安全保存' : '本次已设置') : '未配置';
   $('key-dot').textContent = configured ? '●' : '○';
 }
+function renderUsage(usage, prefix = '') {
+  $('usage').textContent = usage ? `${prefix}${usage.requests} 次请求${usage.tool_calls === undefined ? '' : ` · ${usage.tool_calls} 次工具`} · ${usage.estimated ? '估算 ' : ''}${usage.total_tokens.toLocaleString()} token` : '';
+}
+function renderRun(run) {
+  $('progress').textContent = run.message;
+  $('agent-progress').hidden = false;
+  $('agent-progress').textContent = run.events.slice(-5).map(item => item.message).join('\n');
+  renderUsage(run.usage, '本次分析 · ');
+}
 async function task(action, message = '正在处理…') {
   if (busy) return;
   busy = true; notice(''); $('progress').textContent = message;
@@ -157,7 +166,7 @@ function renderGraph(value) {
   $('graph-stats').textContent = `${value.nodes.length} 个模块 · ${value.edges.length} 条关系${value.incomplete ? ' · 部分覆盖' : ''}`;
   $('mode').textContent = value.mode === 'deepseek-agent' ? 'DeepSeek · Agent 语义图' : (value.mode === 'saved-agent' ? '已保存 · 语义图' : (value.mode === 'deepseek' ? 'DeepSeek · 语义分组' : '本地依赖预览'));
   $('project-type').textContent = value.project_type; $('project-summary').textContent = value.summary + (value.incomplete_regions?.length ? '\n未覆盖：' + value.incomplete_regions.join('；') : '');
-  $('usage').textContent = value.usage ? `${value.usage.requests} 次请求${value.usage.tool_calls === undefined ? '' : ` · ${value.usage.tool_calls} 次工具`} · ${value.usage.estimated ? '估算 ' : ''}${value.usage.total_tokens.toLocaleString()} token` : '';
+  renderUsage(value.usage);
   if (value.warnings?.length) notice(value.warnings.join('；'));
   updateSelection();
   updateControls();
@@ -264,9 +273,7 @@ async function followRun(id) {
       const stream = new EventSource('/api/agent/events?id=' + encodeURIComponent(id));
       const finish = value => { stream.close(); resolve(value); };
       stream.onmessage = event => {
-        const run = JSON.parse(event.data); $('progress').textContent = run.message;
-        $('agent-progress').hidden = false;
-        $('agent-progress').textContent = run.events.slice(-5).map(item => item.message).join('\n');
+        const run = JSON.parse(event.data); renderRun(run);
         if (run.status !== 'running') finish(run);
       };
       stream.onerror = async () => {
@@ -274,7 +281,7 @@ async function followRun(id) {
         // Fall back to a small status response if the event connection drops.
         try {
           let run;
-          do { run = await api('/api/agent/run?id=' + encodeURIComponent(id)); $('progress').textContent = run.message; if (run.status === 'running') await sleep(1000); } while (run.status === 'running');
+          do { run = await api('/api/agent/run?id=' + encodeURIComponent(id)); renderRun(run); if (run.status === 'running') await sleep(1000); } while (run.status === 'running');
           resolve(run);
         } catch (error) { reject(error); }
       };

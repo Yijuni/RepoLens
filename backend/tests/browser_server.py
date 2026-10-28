@@ -3,10 +3,12 @@ import argparse
 from pathlib import Path
 import shutil
 import sys
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from repolens.server import AppState, LocalServer, PROJECT_ROOT
+from repolens.errors import RepoLensError
 from test_workflow import workflow_client
 import test_core
 
@@ -32,7 +34,14 @@ def main():
             raw["relations"][0]["type"] = "dispatches"
             raw["relations"][0]["label"] = "分发任务（模拟）"
             raw["summary"] = "浏览器测试模拟图，不代表真实模型理解。"
-            return workflow_client(state.index, raw)
+            client = workflow_client(state.index, raw, tokens=200_000)
+            class Simulated:
+                def complete(self, messages, max_tokens, tools=None):
+                    time.sleep(.3)
+                    if _kwargs.get("model") == "fixture-failure" and client.requests:
+                        raise RepoLensError("模拟连接中断，请重试。", 502)
+                    return client.complete(messages, max_tokens, tools=tools)
+            return Simulated()
         state = AppState(root, client_factory=factory, restore_key=False)
         state.api_key = "synthetic-browser-test-key"
         with LocalServer(args.port, state) as server:

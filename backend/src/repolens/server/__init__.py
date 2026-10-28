@@ -11,6 +11,7 @@ import secrets
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
@@ -86,9 +87,7 @@ class AppState:
                             "analysis_file_bytes": config.limits.analysis_file_bytes,
                             "analysis_bytes": MAX_TOTAL_BYTES},
                 "agent": {"max_rounds": config.agent.max_rounds,
-                          "max_tool_calls": config.agent.max_tool_calls,
                           "max_read_lines": config.agent.max_read_lines,
-                          "token_budget": config.agent.token_budget,
                           "request_timeout_seconds": config.agent.request_timeout_seconds,
                           "wall_time_seconds": config.agent.wall_time_seconds},
                 "busy": self.lock.locked() or self.picker_pending(), "phase": self.phase,
@@ -118,7 +117,7 @@ class AppState:
             run = self.agent_run
             if not run or run_id and run_id != run["id"]:
                 return None
-            return {key: run[key] for key in ("id", "status", "phase", "message", "error", "events")}
+            return {key: run[key] for key in ("id", "status", "phase", "message", "error", "events", "usage")}
 
     def start_agent(self, body: dict) -> dict:
         if body.get("confirmed") is not True:
@@ -135,7 +134,8 @@ class AppState:
             client = self.client_factory(self.api_key, model=body.get("model", DEFAULT_MODEL),
                                          timeout=config.request_timeout_seconds)
             run = {"id": uuid.uuid4().hex, "status": "running", "phase": "INDEXING", "message": "正在准备分析……",
-                   "error": None, "events": [], "cancel": threading.Event()}
+                   "error": None, "events": [], "cancel": threading.Event(),
+                   "usage": {"requests": 0, "tool_calls": 0, "total_tokens": 0, "estimated": False}}
             with self.agent_guard:
                 self.agent_run = run
             self.phase = run["message"]
@@ -147,36 +147,52 @@ class AppState:
         return {"id": run["id"], "status": "running"}
 
     def _agent_worker(self, run, index, goal, client, config):
+        status, failure = "failed", None
+        started = time.monotonic()
         def event(value):
             with self.agent_guard:
                 run["phase"] = value["phase"]
                 run["message"] = value["message"]
+                run["usage"] = value.get("usage", run["usage"])
                 run["events"] = (run["events"] + [value])[-200:]
                 self.phase = value["message"]
         try:
             LOGGER.info("agent.start run=%s files=%d", run["id"], len(index.documents))
             graph = explore(index, goal, client, settings=config, cancelled=run["cancel"].is_set, on_event=event)
-            with self.agent_guard:
-                if run["cancel"].is_set():
-                    raise RepoLensError("已取消生成，原架构图保持不变。", 409)
-                self.graph = graph
-                run["status"] = "complete"
-            LOGGER.info("agent.complete run=%s requests=%d tools=%d tokens=%d", run["id"],
-                        graph["usage"]["requests"], graph["usage"]["tool_calls"], graph["usage"]["total_tokens"])
+            status = "complete"
         except RepoLensError as exc:
-            with self.agent_guard:
-                run["status"] = "cancelled" if run["cancel"].is_set() else "failed"
-                run["error"] = str(exc)
-            LOGGER.info("agent.stopped run=%s status=%s", run["id"], run["status"])
-        except Exception:
-            with self.agent_guard:
-                run["status"], run["error"] = "failed", "本地分析失败，请查看运行日志后重试。"
-            LOGGER.error("agent.failed run=%s", run["id"])
+            status = "cancelled" if run["cancel"].is_set() else "failed"
+            failure = str(exc)
+            LOGGER.warning("agent.stopped run=%s status=%s phase=%s requests=%d tools=%d tokens=%d error=%s",
+                           run["id"], status, run["phase"], run["usage"]["requests"],
+                           run["usage"]["tool_calls"], run["usage"]["total_tokens"], error_text(exc))
+        except Exception as exc:
+            failure = "本地分析失败，请查看运行日志后重试。"
+            # Keep locations and exception type, never exception payloads or locals.
+            locations = " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+                                   for frame in traceback.extract_tb(exc.__traceback__))
+            LOGGER.error("agent.failed run=%s phase=%s requests=%d tools=%d tokens=%d error_type=%s locations=%s",
+                         run["id"], run["phase"], run["usage"]["requests"], run["usage"]["tool_calls"],
+                         run["usage"]["total_tokens"], type(exc).__name__, locations)
         finally:
             with self.agent_guard:
+                if status == "complete":
+                    if run["cancel"].is_set():
+                        status, failure = "cancelled", "已取消生成，原架构图保持不变。"
+                        LOGGER.info("agent.stopped run=%s status=cancelled reason=cancel_before_publish", run["id"])
+                    else:
+                        self.graph = graph
+                        LOGGER.info("agent.complete run=%s requests=%d tools=%d tokens=%d", run["id"],
+                                    graph["usage"]["requests"], graph["usage"]["tool_calls"], graph["usage"]["total_tokens"])
+                run["status"], run["error"] = status, failure
                 run["phase"] = "IDLE"
-            self.phase = "就绪"
-            self.lock.release()
+                run["usage"] = {**run["usage"], "elapsed_seconds": round(time.monotonic() - started, 2)}
+                if run["error"]:
+                    run["message"] = run["error"]
+                run["events"] = (run["events"] + [{"phase": "IDLE", "status": run["status"],
+                                                   "message": run["message"], "usage": run["usage"]}])[-200:]
+                self.phase = "就绪"
+                self.lock.release()
 
     def cancel_agent(self, run_id: str) -> dict:
         with self.agent_guard:

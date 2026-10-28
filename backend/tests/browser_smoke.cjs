@@ -100,7 +100,9 @@ async function main() {
     await evaluate(`document.getElementById('repo-path').value = ${JSON.stringify(fixturePath)}; document.getElementById('path-form').requestSubmit()`);
     await until(() => evaluate("!document.getElementById('import').disabled"), "fixture import");
     await evaluate("document.getElementById('consent').checked = true; document.getElementById('analyze').click()");
+    await until(() => evaluate("document.getElementById('usage').textContent.includes('本次分析') && document.getElementById('usage').textContent.includes('200,000') && document.getElementById('analyze').disabled"), "live token usage during generation");
     await until(() => evaluate("document.getElementById('mode').textContent.includes('Agent') && !document.getElementById('analyze').disabled"), "semantic Agent finishes", 20000);
+    if (!await evaluate("document.getElementById('usage').textContent.includes('600,000')")) throw new Error("Large cumulative usage stopped or was not displayed");
     if (await evaluate("document.querySelectorAll('.edge-label').length") !== 1) throw new Error("Semantic relation missing");
     await evaluate("document.querySelector('.graph-node').dispatchEvent(new MouseEvent('click', { bubbles: true }))");
     await until(() => evaluate("document.querySelectorAll('#symbol-shortcuts button').length >= 2"), "multiple module anchors");
@@ -110,6 +112,13 @@ async function main() {
     await until(() => evaluate("document.getElementById('notice').textContent.includes('已保存') && !document.getElementById('save-architecture').disabled"), "save current repository");
     await evaluate("document.getElementById('refresh').click()");
     await until(() => evaluate("document.getElementById('mode').textContent.includes('已保存') && !document.getElementById('refresh').disabled"), "restore saved graph");
+    // Force the SSE fallback and a model failure, then retry successfully.
+    await evaluate(`window.originalEventSource = window.EventSource; window.EventSource = class { constructor() { setTimeout(() => this.onerror?.(), 0); } close() {} };
+      document.getElementById('model').value='fixture-failure'; document.getElementById('consent').checked=true; document.getElementById('analyze').click()`);
+    await until(() => evaluate("document.getElementById('notice').textContent.includes('模拟连接中断') && !document.getElementById('analyze').disabled"), "failure restores controls through polling fallback");
+    if (!await evaluate("document.getElementById('usage').textContent.includes('200,000') && document.getElementById('agent-progress').textContent.includes('模拟连接中断') && document.getElementById('mode').textContent.includes('已保存') && document.getElementById('cancel-analysis').hidden")) throw new Error('Failure lost usage, reason or prior graph');
+    await evaluate("window.EventSource = window.originalEventSource; document.getElementById('model').value='deepseek-chat'; document.getElementById('analyze').click()");
+    await until(() => evaluate("document.getElementById('mode').textContent.includes('Agent') && !document.getElementById('analyze').disabled"), "retry after failure");
     // Exercise the browser directory-handle branch with a controlled in-memory
     // handle. Opening the OS picker itself remains a manual browser check.
     await evaluate(`(() => {
@@ -158,7 +167,7 @@ async function main() {
     const shot = await command("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
     fs.writeFileSync(screenshot, Buffer.from(shot.data, "base64"));
     if (errors.length) throw new Error("Browser errors: " + errors.join("; "));
-    console.log("PASS: graph/source/consent/zoom, mock Agent, relation styles, multiple anchors, save/reimport, DPI emulation; no JS/CSP errors.");
+    console.log("PASS: graph/source/consent/zoom, mock Agent, live usage beyond old quota, failure/polling/retry, relation styles, multiple anchors, save/reimport, DPI emulation; no JS/CSP errors.");
     console.log("Screenshot: " + screenshot);
     await command("Browser.close").catch(() => {});
   } catch (error) {

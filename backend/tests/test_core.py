@@ -34,7 +34,7 @@ class ConfigTests(unittest.TestCase):
         path = root / ("config_" + uuid.uuid4().hex + ".toml")
         path.write_text(
             "[server]\nlog_dir = 'custom-logs'\nport = 1234\n"
-            "[limits]\nbrowse_files = 900\n[agent]\nmax_rounds = 4\n",
+            "[limits]\nbrowse_files = 900\n[agent]\nmax_rounds = 4\ntoken_budget = 512\nmax_tool_calls = 1\n",
             encoding="utf-8",
         )
         try:
@@ -45,6 +45,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agent.max_rounds, 4)
         self.assertEqual(config.server.port, 1234)
         self.assertTrue(config.server.log_dir.is_absolute())
+        self.assertFalse(hasattr(config.agent, "token_budget"))
+        self.assertFalse(hasattr(config.agent, "max_tool_calls"))
+        self.assertTrue(any("agent.token_budget" in warning for warning in config.warnings))
+        self.assertTrue(any("agent.max_tool_calls" in warning for warning in config.warnings))
 
 
 class RepositoryCase(unittest.TestCase):

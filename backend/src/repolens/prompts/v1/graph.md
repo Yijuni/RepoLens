@@ -6,4 +6,4 @@
 
 边只能选自 repository.import_edges，类型只能是 import，不添加逆向或其他没有证据的边。每条边必须连接本次 nodes 中存在的节点，confidence 在 0 到 1 之间。import 只表明静态导入，不代表实际调用、执行顺序或依赖确实被使用。
 
-给出简短的 project_type 和整体 summary。不确定的项目定位要说明依据有限。尽量保留全部节点和已有 import 边；如有遗漏、预算不足或 repository.incomplete 为 true，必须把 incomplete 设为 true。不要凭空补足关系。
+给出简短的 project_type 和整体 summary。不确定的项目定位要说明依据有限。尽量保留全部节点和已有 import 边；如有遗漏、材料不足或 repository.incomplete 为 true，必须把 incomplete 设为 true。不要凭空补足关系。
