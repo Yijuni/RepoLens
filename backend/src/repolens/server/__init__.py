@@ -600,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     config = get_config()
     parser = argparse.ArgumentParser(description="RepoLens 本地 DeepSeek 代码理解服务")
-    parser.add_argument("--repo", help="启动时导入的代码仓库；默认使用内置示例")
+    parser.add_argument("--repo", help="启动时导入的现有项目目录，路径请用双引号包围；默认使用内置示例")
     parser.add_argument("--port", type=int, default=None, help="本机端口；默认读取 config.toml")
     parser.add_argument("--log-dir", help="日志目录；默认写入仓库根目录 logs，也可用 REPOLENS_LOG_DIR")
     parser.add_argument("--open", action="store_true", help="启动后打开浏览器")
@@ -626,7 +626,14 @@ def main():
                 webbrowser.open(server.origin)
             server.serve_forever()
     except RepoLensError as exc:
-        parser.exit(1, f"{exc}\n")
+        LOGGER.warning("server.start_failed error=%s", error_text(exc))
+        message = str(exc)
+        if args.repo and (args.repo.startswith("'") or args.repo.endswith("'")):
+            message += (
+                "\n检测到 --repo 路径包含单引号。Windows CMD 会将单引号视为路径字符，请改用双引号。"
+                "\n请确认目录实际存在；也可省略 --repo，启动后在网页中选择项目。"
+            )
+        parser.exit(1, f"{message}\n")
     except KeyboardInterrupt:
         LOGGER.info("server.stopped reason=keyboard_interrupt")
         print("\nRepoLens 已停止。", flush=True)

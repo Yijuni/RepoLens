@@ -2,6 +2,8 @@
 
 ThreadingHTTPServer 组合索引、Agent、凭据与网页，只监听 127.0.0.1，默认随机端口。
 
+从项目根目录运行 `python -X utf8 backend/run.py --open`，默认导入内置示例。可用 `--repo "samples\mini_project"` 指定现有项目目录；双引号同时兼容 CMD 和 PowerShell，相对路径以当前终端目录为基准。启动失败会写入 `server.start_failed` 日志；路径带单引号时会提示 CMD 的引号规则，不自动修改用户输入的路径。
+
 | 接口 | 用途 |
 | --- | --- |
 | GET /、/api/state | 页面/会话 Cookie、当前仓库与图、凭据配置状态 |

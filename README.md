@@ -28,8 +28,10 @@ python -X utf8 backend/run.py --open
 服务只监听 `127.0.0.1` 的随机端口；Ctrl+C 停止。可指定启动时导入的项目：
 
 ```powershell
-python -X utf8 backend/run.py --repo 'E:\projects\my-project' --open
+python -X utf8 backend/run.py --repo "samples\mini_project" --open
 ```
+
+上面的命令导入内置示例。分析自己的项目时，将 `samples\mini_project` 替换为本机已存在的项目目录；相对路径以当前终端目录为基准。路径使用双引号，兼容 Windows CMD 和 PowerShell。也可省略 `--repo`，启动后在网页中选择项目。
 
 使用 Conda：
 
